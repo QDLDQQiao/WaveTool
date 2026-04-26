@@ -77,6 +77,11 @@ class SettingsPanel(QWidget):
         self.lbl_g_angle = QLabel("Grating Angle:")
         self.layout.addRow(self.lbl_g_angle, self.grating_angle)
 
+        self.wavefront_type = QComboBox()
+        self.wavefront_type.addItems(["Effective WF", "Real WF"])
+        self.lbl_wf_type = QLabel("Wavefront:")
+        self.layout.addRow(self.lbl_wf_type, self.wavefront_type)
+
         # --- Hartmann Specific ---
         self.plate_angle = QDoubleSpinBox()
         self.plate_angle.setRange(-180, 180)
@@ -133,6 +138,8 @@ class SettingsPanel(QWidget):
         self.lbl_g_type.setVisible(is_talbot)
         self.grating_angle.setVisible(is_talbot)
         self.lbl_g_angle.setVisible(is_talbot)
+        self.wavefront_type.setVisible(is_talbot)
+        self.lbl_wf_type.setVisible(is_talbot)
         
         self.plate_angle.setVisible(not is_talbot)
         self.lbl_p_angle.setVisible(not is_talbot)
@@ -156,6 +163,7 @@ class SettingsPanel(QWidget):
             "crop": (self.crop_l.value(), self.crop_t.value(), self.crop_r.value(), self.crop_b.value()),
             "grating_type": self.grating_type.currentText(),
             "grating_angle": float(self.grating_angle.currentText()),
+            "real_wf": self.wavefront_type.currentText() == "Real WF",
             "plate_angle": self.plate_angle.value(),
             "mask_threshold": self.mask_threshold.value(),
             "save_path": self.save_path.text(),

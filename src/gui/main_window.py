@@ -3,6 +3,7 @@ from PyQt6.QtGui import QAction
 from PyQt6.QtCore import QTimer
 import cv2
 import numpy as np
+from PIL import Image
 
 from .widgets.camera_view import CameraView
 from .widgets.settings_panel import SettingsPanel
@@ -121,15 +122,9 @@ class MainWindow(QMainWindow):
             self.live_mode = False
             self.timer.stop()
             
-            # Load using OpenCV
-            # cv2.imread with IMREAD_UNCHANGED preserves 16-bit depth for TIFFs
-            img = cv2.imread(file_name, cv2.IMREAD_UNCHANGED)
+            img = self._read_grayscale_image(file_name)
             
             if img is not None:
-                # If image has multiple channels (e.g. RGB), convert to grayscale
-                if len(img.shape) == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    
                 self.camera_view.update_image(img)
                 print(f"Loaded image: {file_name}, Shape: {img.shape}, Dtype: {img.dtype}")
             else:
@@ -280,9 +275,11 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            img = self._read_grayscale_image(path)
             if img is not None:
                 self.ref_view.update_image(img)
+            else:
+                print("Failed to load reference image")
         except Exception as e:
             print(f"Error loading ref: {e}")
 
@@ -300,3 +297,26 @@ class MainWindow(QMainWindow):
     def open_talbot_calc(self):
         self.talbot_dialog = TalbotPeriodDialog(self)
         self.talbot_dialog.show()
+
+    def _read_grayscale_image(self, path):
+        """
+        Robust image reader for GUI load/preview.
+        Handles OpenCV decode failures (e.g., unicode paths or some TIFF variants)
+        by falling back to PIL.
+        """
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            try:
+                with Image.open(path) as pil_img:
+                    img = np.array(pil_img)
+            except Exception:
+                return None
+
+        if img.ndim == 3:
+            if img.shape[2] >= 3:
+                # Works for RGB/BGR/RGBA by taking first 3 channels.
+                img = np.dot(img[..., :3], [0.114, 0.587, 0.299]).astype(img.dtype)
+            else:
+                img = img[..., 0]
+
+        return img

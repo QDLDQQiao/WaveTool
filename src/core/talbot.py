@@ -26,9 +26,10 @@ class TalbotProcessor(WavefrontProcessor):
         self.dist = params.get("distance_mm", 100.0) * 1e-3
         self.gt_period = params.get("period_um", 4.8) * 1e-6
         self.p_x = params.get("pixel_size_um", 6.5) * 1e-6
-        self.mode = params.get("analysis_mode", "Absolute")
+        self.mode = str(params.get("analysis_mode", "Absolute")).strip().lower()
         self.correct_angle = params.get("correct_angle", False)
         self.use_mask = params.get("use_mask", False)
+        self.real_wf = params.get("real_wf", False)
         self.crop_rect = params.get("crop", [0, 0, 0, 0])
         self.save_path = params.get("save_path", None)
         self.grating_type = params.get("grating_type", "phase")  # phase or absorption
@@ -77,12 +78,12 @@ class TalbotProcessor(WavefrontProcessor):
         self.gt_period_effect = period_real
         # self.gt_period_effect = [self.gt_period, self.gt_period]
 
-        if self.mode == "Absolute":
+        if self.mode == "absolute":
             
             dxy, dxy_raw, dpc, _, dark_field, int00, virtual_pixelsize = self.solve(image, None)
         
         else:  # Relative
-            ref_path = params.get("ref_path", None)
+            ref_path = params.get("ref_image_path", params.get("ref_path", None))
             if ref_path is None:
                 raise ValueError("Reference image path must be provided for Relative mode.")
             
@@ -143,7 +144,9 @@ class TalbotProcessor(WavefrontProcessor):
             "pv_value": np.ptp(residual_2nd),
             "rms_value": np.std(residual_2nd),
             "roc_x": roc_x,
-            "roc_y": roc_y
+            "roc_y": roc_y,
+            "period_real": [period_real[0] * 1e6, period_real[1] * 1e6],
+            "source_wavefront_added": bool(self.real_wf)
         }
 
     def solve(self, img, ref=None):
@@ -232,9 +235,9 @@ class TalbotProcessor(WavefrontProcessor):
         if self.mode == 'relative':
             if self.correct_angle:
                 ref_rot = snd.rotate(ref, angle_error/np.pi*180, reshape=False, order=3)
-                ref_fft = self.fft2(ref_rot)
+                ref_fft = fft2(ref_rot)
             else:
-                ref_fft = self.fft2(ref)
+                ref_fft = fft2(ref)
             ref_11 = extract_subimage(ref_fft, Harm=(1, 1))
             ref_01 = extract_subimage(ref_fft, Harm=(0, 1))
             ref_10 = extract_subimage(ref_fft, Harm=(1, 0))
@@ -286,8 +289,15 @@ class TalbotProcessor(WavefrontProcessor):
         dx_all = dx + XX_diff
         dy_all = dy + YY_diff
 
-        diffPhase01 = dx_all * 2*np.pi *virtual_pixelsize[1]/self.dist
-        diffPhase10 = dy_all * 2*np.pi *virtual_pixelsize[0]/self.dist
+        if self.real_wf:
+            dx_used = dx_all
+            dy_used = dy_all
+        else:
+            dx_used = dx
+            dy_used = dy
+
+        diffPhase01 = dx_used * 2*np.pi *virtual_pixelsize[1]/self.dist
+        diffPhase10 = dy_used * 2*np.pi *virtual_pixelsize[0]/self.dist
 
         if self.correct_angle:
             # crop the boundary due to the image rotation
@@ -297,6 +307,8 @@ class TalbotProcessor(WavefrontProcessor):
             dy = crop(dy)
             dx_all = crop(dx_all)
             dy_all = crop(dy_all)
+            dx_used = crop(dx_used)
+            dy_used = crop(dy_used)
             diffPhase01 = crop(diffPhase01)
             diffPhase10 = crop(diffPhase10)
             darkField01 = crop(darkField01)
@@ -305,7 +317,7 @@ class TalbotProcessor(WavefrontProcessor):
 
         phase = frankotchellappa(diffPhase01 * virtual_pixelsize[1], diffPhase10 * virtual_pixelsize[0]) / self.wavelength
 
-        return [dx_all, dy_all], [dx, dy], [diffPhase01, diffPhase10], phase - np.amin(phase), [darkField01, darkField10], int00, virtual_pixelsize
+        return [dx_used, dy_used], [dx, dy], [diffPhase01, diffPhase10], phase - np.amin(phase), [darkField01, darkField10], int00, virtual_pixelsize
     
     
     def find_rotation_angle(self, p_x, period, img):
@@ -577,4 +589,3 @@ def process_single_slice(args):
         sigma_x, sigma_y, fwhm_x, fwhm_y = 0.0, 0.0, 0.0, 0.0
     
     return intensity, L_z, sigma_x, sigma_y, fwhm_x, fwhm_y, new_p_x
-
