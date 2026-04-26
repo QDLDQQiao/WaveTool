@@ -5,6 +5,10 @@ class SettingsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QFormLayout(self)
+
+        # All numeric inputs should support high precision.
+        precision_decimals = 4
+        precision_step = 0.0001
         
         # --- Mode Selection ---
         self.mode_selector = QComboBox()
@@ -15,24 +19,32 @@ class SettingsPanel(QWidget):
         # --- Common Parameters ---
         self.energy = QDoubleSpinBox()
         self.energy.setRange(0.1, 100.0)
+        self.energy.setDecimals(precision_decimals)
+        self.energy.setSingleStep(precision_step)
         self.energy.setValue(10.0)
         self.energy.setSuffix(" keV")
         self.layout.addRow("X-ray Energy:", self.energy)
 
         self.pixel_size = QDoubleSpinBox()
         self.pixel_size.setRange(0.1, 100.0)
+        self.pixel_size.setDecimals(precision_decimals)
+        self.pixel_size.setSingleStep(precision_step)
         self.pixel_size.setValue(0.65)
         self.pixel_size.setSuffix(" um")
         self.layout.addRow("Pixel Size:", self.pixel_size)
 
         self.distance = QDoubleSpinBox()
         self.distance.setRange(1.0, 10000.0)
+        self.distance.setDecimals(precision_decimals)
+        self.distance.setSingleStep(precision_step)
         self.distance.setValue(100.0)
         self.distance.setSuffix(" mm")
         self.layout.addRow("Distance (G/P to Det):", self.distance)
 
         self.period = QDoubleSpinBox()
         self.period.setRange(0.1, 1000.0)
+        self.period.setDecimals(precision_decimals)
+        self.period.setSingleStep(precision_step)
         self.period.setValue(4.8)
         self.period.setSuffix(" um")
         self.layout.addRow("Period (Grating/Hole):", self.period)
@@ -61,6 +73,8 @@ class SettingsPanel(QWidget):
         self.crop_b = QDoubleSpinBox()
         for w in [self.crop_l, self.crop_t, self.crop_r, self.crop_b]:
             w.setRange(0, 10000)
+            w.setDecimals(precision_decimals)
+            w.setSingleStep(precision_step)
             w.setValue(0)
             crop_layout.addWidget(w)
         crop_group.setLayout(crop_layout)
@@ -85,13 +99,16 @@ class SettingsPanel(QWidget):
         # --- Hartmann Specific ---
         self.plate_angle = QDoubleSpinBox()
         self.plate_angle.setRange(-180, 180)
+        self.plate_angle.setDecimals(precision_decimals)
+        self.plate_angle.setSingleStep(precision_step)
         self.plate_angle.setSuffix(" deg")
         self.lbl_p_angle = QLabel("Plate Angle:")
         self.layout.addRow(self.lbl_p_angle, self.plate_angle)
         
         self.mask_threshold = QDoubleSpinBox()
         self.mask_threshold.setRange(0.0, 1.0)
-        self.mask_threshold.setSingleStep(0.05)
+        self.mask_threshold.setDecimals(precision_decimals)
+        self.mask_threshold.setSingleStep(precision_step)
         self.mask_threshold.setValue(0.2)
         self.lbl_mask_thresh = QLabel("Mask Threshold:")
         self.layout.addRow(self.lbl_mask_thresh, self.mask_threshold)
