@@ -5,6 +5,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import numpy as np
 import pyqtgraph as pg
+import os
 
 class FocusAnalysisWindow(QWidget):
     def __init__(self, processor, phase_map, transmission=None, parent=None):
@@ -52,6 +53,71 @@ class FocusAnalysisWindow(QWidget):
         self.upsampling.setValue(1)
         self.param_layout.addWidget(QLabel("Up-sampling Factor:"))
         self.param_layout.addWidget(self.upsampling)
+
+        self.btn_auto_sampling = QPushButton("Auto Suggest Sampling")
+        self.btn_auto_sampling.clicked.connect(self.auto_suggest_sampling)
+        self.param_layout.addWidget(self.btn_auto_sampling)
+
+        self.lbl_sampling_hint = QLabel("Suggestion: -")
+        self.lbl_sampling_hint.setWordWrap(True)
+        self.param_layout.addWidget(self.lbl_sampling_hint)
+
+        self.chk_advanced_sampling = QCheckBox("Advanced Sampling Guard")
+        self.chk_advanced_sampling.toggled.connect(self.toggle_advanced_sampling)
+        self.param_layout.addWidget(self.chk_advanced_sampling)
+
+        self.advanced_sampling_group = QGroupBox("Advanced Guard Settings")
+        self.advanced_sampling_layout = QGridLayout(self.advanced_sampling_group)
+        self.advanced_sampling_layout.addWidget(QLabel("Suggest Budget Ratio:"), 0, 0)
+        self.suggest_budget_ratio = QDoubleSpinBox()
+        self.suggest_budget_ratio.setRange(0.05, 0.95)
+        self.suggest_budget_ratio.setSingleStep(0.01)
+        self.suggest_budget_ratio.setDecimals(2)
+        self.suggest_budget_ratio.setValue(0.30)
+        self.suggest_budget_ratio.setToolTip(
+            "Fraction of available RAM used by auto-suggest when proposing parameters.\n"
+            "Lower = safer suggestions, higher = more aggressive."
+        )
+        self.advanced_sampling_layout.addWidget(self.suggest_budget_ratio, 0, 1)
+
+        self.advanced_sampling_layout.addWidget(QLabel("Run Budget Ratio:"), 1, 0)
+        self.run_budget_ratio = QDoubleSpinBox()
+        self.run_budget_ratio.setRange(0.05, 0.95)
+        self.run_budget_ratio.setSingleStep(0.01)
+        self.run_budget_ratio.setDecimals(2)
+        self.run_budget_ratio.setValue(0.35)
+        self.run_budget_ratio.setToolTip(
+            "Fraction of available RAM allowed before UI-side guard auto-clamps settings.\n"
+            "Lower = clamps earlier, higher = allows larger runs."
+        )
+        self.advanced_sampling_layout.addWidget(self.run_budget_ratio, 1, 1)
+
+        self.advanced_sampling_layout.addWidget(QLabel("Backend Stack Ratio:"), 2, 0)
+        self.backend_stack_ratio = QDoubleSpinBox()
+        self.backend_stack_ratio.setRange(0.05, 0.95)
+        self.backend_stack_ratio.setSingleStep(0.01)
+        self.backend_stack_ratio.setDecimals(2)
+        self.backend_stack_ratio.setValue(0.60)
+        self.backend_stack_ratio.setToolTip(
+            "Fraction of available RAM reserved for propagated intensity stack in backend.\n"
+            "Lower = safer against OOM, higher = allows larger stack."
+        )
+        self.advanced_sampling_layout.addWidget(self.backend_stack_ratio, 2, 1)
+
+        self.advanced_sampling_layout.addWidget(QLabel("Worker Mem Ratio:"), 3, 0)
+        self.worker_mem_ratio = QDoubleSpinBox()
+        self.worker_mem_ratio.setRange(0.05, 0.95)
+        self.worker_mem_ratio.setSingleStep(0.01)
+        self.worker_mem_ratio.setDecimals(2)
+        self.worker_mem_ratio.setValue(0.25)
+        self.worker_mem_ratio.setToolTip(
+            "Fraction of available RAM used to limit parallel worker count.\n"
+            "Lower = fewer workers (safer), higher = more workers (faster if memory permits)."
+        )
+        self.advanced_sampling_layout.addWidget(self.worker_mem_ratio, 3, 1)
+
+        self.param_layout.addWidget(self.advanced_sampling_group)
+        self.advanced_sampling_group.hide()
         
         self.direction = QComboBox()
         self.direction.addItems(["forward", "backward"])
@@ -382,8 +448,13 @@ class FocusAnalysisWindow(QWidget):
             "calc_sigma": self.calc_sigma.isChecked(),
             "magnification_x": self.mag_x.value(),
             "magnification_y": self.mag_y.value(),
-            "padding_scale": self.padding_scale.value()
+            "padding_scale": self.padding_scale.value(),
+            "available_memory_bytes": self._get_available_memory_bytes(),
+            **self._advanced_sampling_params()
         }
+        params, guard_msg = self._guard_sampling_memory(params)
+        if guard_msg:
+            self.lbl_sampling_hint.setText(f"Suggestion: {guard_msg}")
         
         # Define a callback to update progress
         def progress_callback(percent):
@@ -402,6 +473,7 @@ class FocusAnalysisWindow(QWidget):
                 self.update_plots(self.results)
         except Exception as e:
             print(f"Analysis stopped or failed: {e}")
+            self.lbl_sampling_hint.setText(f"Suggestion: run failed ({e}). Try lower upsampling/padding.")
         finally:
             self.btn_calc.setEnabled(True)
             self.btn_stop.setEnabled(False)
@@ -544,6 +616,145 @@ class FocusAnalysisWindow(QWidget):
         self.stop_requested = True
         self.btn_stop.setEnabled(False)
 
+    def auto_suggest_sampling(self):
+        params = {
+            "distance_mm": self.distance.value(),
+            "range_mm": self.dist_range.value(),
+            "step_mm": self.dist_step.value(),
+            "direction": self.direction.currentText(),
+            "upsampling": self.upsampling.value(),
+            "method": self.method.currentText(),
+            "magnification_x": self.mag_x.value(),
+            "magnification_y": self.mag_y.value(),
+            "padding_scale": self.padding_scale.value(),
+            "available_memory_bytes": self._get_available_memory_bytes(),
+            **self._advanced_sampling_params()
+        }
+        suggested, msg = self._suggest_sampling_params(params)
+        self.upsampling.setValue(float(suggested["upsampling"]))
+        self.padding_scale.setValue(float(suggested["padding_scale"]))
+        if self.method.currentText() == "Wofry":
+            self.mag_x.setValue(float(suggested["magnification_x"]))
+            self.mag_y.setValue(float(suggested["magnification_y"]))
+        self.lbl_sampling_hint.setText(f"Suggestion: {msg}")
+
+    def _get_available_memory_bytes(self):
+        # Best effort without extra dependencies.
+        try:
+            import psutil
+            return int(psutil.virtual_memory().available)
+        except Exception:
+            pass
+        try:
+            pages = os.sysconf("SC_AVPHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            return int(pages * page_size)
+        except Exception:
+            # Fallback: assume 4 GB available
+            return int(4 * 1024**3)
+
+    def _count_prop_steps(self, dist_range_m, dist_step_m):
+        if dist_step_m <= 0:
+            return 1
+        return int(np.floor(dist_range_m / dist_step_m + 1e-9)) + 1
+
+    def _estimate_memory_bytes(self, params):
+        h, w = self.phase_map.shape
+        up = max(float(params.get("upsampling", 1.0)), 0.1)
+        pad = max(float(params.get("padding_scale", 1.0)), 1.0)
+        steps = self._count_prop_steps(float(params.get("range_mm", 10.0)) * 1e-3,
+                                       float(params.get("step_mm", 1.0)) * 1e-3)
+        hh = max(1, int(h * up * pad))
+        ww = max(1, int(w * up * pad))
+
+        # Approx memory: output stack (float64) + one complex field + temp overhead.
+        output_bytes = steps * hh * ww * 8
+        field_bytes = hh * ww * 16
+        overhead = int(2.5 * field_bytes)
+        return output_bytes + field_bytes + overhead
+
+    def _suggest_sampling_params(self, params):
+        method = str(params.get("method", "default"))
+        up = float(params.get("upsampling", 1.0))
+        pad = float(params.get("padding_scale", 1.0))
+        mag_x = float(params.get("magnification_x", 1.0))
+        mag_y = float(params.get("magnification_y", 1.0))
+        avail = int(params.get("available_memory_bytes", self._get_available_memory_bytes()))
+        budget = int(avail * float(params.get("sampling_suggest_budget_ratio", 0.30)))
+
+        # Base anti-alias suggestion.
+        up_suggest = max(up, 2.0)
+        pad_suggest = max(pad, 2.0)
+        if method == "Wofry":
+            mag_x_suggest = min(mag_x, 0.5)
+            mag_y_suggest = min(mag_y, 0.5)
+        else:
+            mag_x_suggest = mag_x
+            mag_y_suggest = mag_y
+
+        trial = dict(params)
+        trial["upsampling"] = up_suggest
+        trial["padding_scale"] = pad_suggest
+        trial["magnification_x"] = mag_x_suggest
+        trial["magnification_y"] = mag_y_suggest
+        mem_trial = self._estimate_memory_bytes(trial)
+
+        # Memory-aware clamp.
+        if mem_trial > budget:
+            h, w = self.phase_map.shape
+            steps = self._count_prop_steps(float(params.get("range_mm", 10.0)) * 1e-3,
+                                           float(params.get("step_mm", 1.0)) * 1e-3)
+            coeff = max(1.0, 8.0 * steps * h * w * (pad_suggest ** 2))
+            up_max = (budget / coeff) ** 0.5
+            up_suggest = float(np.clip(up_max, 0.5, 3.0))
+            if up_suggest < 1.0:
+                pad_suggest = 1.5
+
+        suggested = {
+            "upsampling": float(np.clip(up_suggest, 0.1, 10.0)),
+            "padding_scale": float(np.clip(pad_suggest, 1.0, 10.0)),
+            "magnification_x": float(np.clip(mag_x_suggest, 0.001, 1000.0)),
+            "magnification_y": float(np.clip(mag_y_suggest, 0.001, 1000.0)),
+        }
+        mem_gb = self._estimate_memory_bytes({**params, **suggested}) / 1024**3
+        msg = (
+            f"Use upsampling={suggested['upsampling']:.2f}, padding={suggested['padding_scale']:.2f}"
+            f"{', mag=0.50' if method == 'Wofry' else ''} (est. RAM ~{mem_gb:.2f} GB)"
+        )
+        return suggested, msg
+
+    def _guard_sampling_memory(self, params):
+        est = self._estimate_memory_bytes(params)
+        avail = int(params.get("available_memory_bytes", self._get_available_memory_bytes()))
+        budget = int(avail * float(params.get("sampling_run_budget_ratio", 0.35)))
+        if est <= budget:
+            return params, ""
+
+        suggested, msg = self._suggest_sampling_params(params)
+        guarded = dict(params)
+        guarded.update(suggested)
+
+        # Reflect applied clamp in UI so user sees actual run params.
+        self.upsampling.setValue(float(guarded["upsampling"]))
+        self.padding_scale.setValue(float(guarded["padding_scale"]))
+        if self.method.currentText() == "Wofry":
+            self.mag_x.setValue(float(guarded["magnification_x"]))
+            self.mag_y.setValue(float(guarded["magnification_y"]))
+        return guarded, f"settings auto-clamped for RAM safety. {msg}"
+
+    def toggle_advanced_sampling(self, checked):
+        self.advanced_sampling_group.setVisible(bool(checked))
+
+    def _advanced_sampling_params(self):
+        if not self.chk_advanced_sampling.isChecked():
+            return {}
+        return {
+            "sampling_suggest_budget_ratio": self.suggest_budget_ratio.value(),
+            "sampling_run_budget_ratio": self.run_budget_ratio.value(),
+            "backend_stack_ratio": self.backend_stack_ratio.value(),
+            "worker_memory_ratio": self.worker_mem_ratio.value(),
+        }
+
     def sync_profile_levels(self):
         """Synchronize profile plot axes with image contrast levels."""
         levels = self.img_item.getLevels()
@@ -669,6 +880,3 @@ class FocusAnalysisWindow(QWidget):
         
         # Set Camera
         # self.view_3d.setCameraPosition(distance=target_z * 1.5, elevation=30, azimuth=45)
-
-
-

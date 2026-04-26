@@ -30,6 +30,28 @@ class AnalysisResultWindow(QWidget):
                       f"RMS: {results.get('rms_value', 0):.4f} rad | "
                       f"Rx: {roc_x:.4f} m | Ry: {roc_y:.4f} m")
         
+        if 'period_real' in results:
+            p_real = results.get('period_real', [0.0, 0.0])
+            stats_text += f" | P_real: {p_real[0]:.3f}x{p_real[1]:.3f} um"
+
+        if 'period_effective' in results:
+            p_eff = results.get('period_effective', [0.0, 0.0])
+            stats_text += f" | P_eff: {p_eff[0]:.3f}x{p_eff[1]:.3f} um"
+
+        if 'period_method' in results:
+            pm = results.get('period_method', ["", ""])
+            stats_text += f" | EffMethod(V/H): {pm[0]}/{pm[1]}"
+
+        if 'source_distance_m' in results:
+            sd = results.get('source_distance_m', [0.0, 0.0])
+            stats_text += f" | SrcD(V/H): {sd[0]:.4f}/{sd[1]:.4f} m"
+        elif 'source_distance_mm' in results:
+            sd = results.get('source_distance_mm', [0.0, 0.0])
+            stats_text += f" | SrcD(V/H): {sd[0]:.3f}/{sd[1]:.3f} mm"
+
+        if 'source_wavefront_added' in results:
+            stats_text += f" | RealWF: {'ON' if results.get('source_wavefront_added') else 'OFF'}"
+
         if 'rotation_angle' in results:
             angle = results['rotation_angle']
             period = results['period_real']

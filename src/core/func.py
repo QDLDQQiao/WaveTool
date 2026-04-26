@@ -4,11 +4,18 @@ import sys
 from PIL import Image
 import h5py
 import json
+import warnings
+from pathlib import Path
 from matplotlib import pyplot as plt
 import matplotlib
 from scipy.optimize import curve_fit
 from wofry.propagator.wavefront2D.generic_wavefront import GenericWavefront2D
 from wofryimpl.propagator.propagators2D.fresnel_zoom_xy import FresnelZoomXY2D
+
+try:
+    import tifffile
+except ImportError:
+    tifffile = None
 
 font = {'family' : 'sans-serif',
         # 'weight' : 'bold',
@@ -51,20 +58,55 @@ def prColor(word, color_type):
     print(start_c + str(word) + end_c)
 
 def load_image(file_path, stack=False):
-    if os.path.exists(file_path):
-        if not stack:
-            img = np.array(Image.open(file_path))
-        else:
-            dataset = Image.open(file_path)
-            h,w = np.shape(dataset)
-            img = np.zeros((dataset.n_frames, h,w))
-            for i in range(dataset.n_frames):
-                dataset.seek(i)
-                img[i, :,:] = np.array(dataset)
-            
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Image file not found: {file_path}")
+
+    suffix = Path(file_path).suffix.lower()
+    img = None
+
+    # Robust TIFF path first.
+    if suffix in ('.tif', '.tiff'):
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning, module="PIL.TiffImagePlugin")
+                with Image.open(file_path) as dataset:
+                    if stack and getattr(dataset, "n_frames", 1) > 1:
+                        frames = []
+                        for i in range(dataset.n_frames):
+                            dataset.seek(i)
+                            frames.append(np.array(dataset))
+                        img = np.stack(frames, axis=0)
+                    else:
+                        img = np.array(dataset)
+        except Exception:
+            img = None
+
+        if img is None and tifffile is not None:
+            try:
+                if stack:
+                    img = tifffile.imread(file_path)
+                else:
+                    with tifffile.TiffFile(file_path) as tf:
+                        img = tf.asarray(key=0)
+            except Exception:
+                img = None
     else:
-        prColor('Error: wrong data path. No data is loaded.', 'red')
-        sys.exit()
+        try:
+            with Image.open(file_path) as dataset:
+                img = np.array(dataset)
+        except Exception:
+            img = None
+
+    if img is None:
+        raise ValueError(f"Failed to load image: {file_path}")
+
+    # Convert color image to grayscale for analysis consistency.
+    if img.ndim == 3 and not stack:
+        if img.shape[2] >= 3:
+            img = np.dot(img[..., :3], [0.114, 0.587, 0.299])
+        else:
+            img = img[..., 0]
+
     return np.array(img).astype(np.float32)
 
 def img_save(folder_path, filename, img):

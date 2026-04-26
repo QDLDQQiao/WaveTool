@@ -4,3 +4,14 @@ matplotlib
 scipy
 opencv-python
 pyqtgraph
+PyOpenGL
+PyOpenGL-accelerate
+Pillow
+h5py
+scikit-image
+psutil
+tqdm
+wofry
+wofryimpl
+tifffile
+imagecodecs

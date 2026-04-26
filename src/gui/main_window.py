@@ -1,9 +1,16 @@
-from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QFileDialog, QMenuBar, QInputDialog
+from PyQt6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QFileDialog, QMenuBar, QInputDialog, QLabel
 from PyQt6.QtGui import QAction
 from PyQt6.QtCore import QTimer
 import cv2
 import numpy as np
 from PIL import Image
+import warnings
+from pathlib import Path
+
+try:
+    import tifffile
+except ImportError:
+    tifffile = None
 
 from .widgets.camera_view import CameraView
 from .widgets.settings_panel import SettingsPanel
@@ -30,6 +37,7 @@ class MainWindow(QMainWindow):
         }
         self.current_processor = self.processors["Talbot Interferometry"]
         self.live_mode = False
+        self.active_image_target = "sample"
         
         # State for tools
         self.saved_image_before_period = None
@@ -42,14 +50,26 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.main_layout = QHBoxLayout(self.central_widget)
 
-        # Left: Camera View
+        # Left: Sample View
+        self.sample_panel = QWidget()
+        self.sample_layout = QVBoxLayout(self.sample_panel)
+        self.sample_layout.setContentsMargins(0, 0, 0, 0)
+        self.sample_label = QLabel("Sample")
+        self.sample_layout.addWidget(self.sample_label)
         self.camera_view = CameraView()
-        self.main_layout.addWidget(self.camera_view, stretch=2)
+        self.sample_layout.addWidget(self.camera_view)
+        self.main_layout.addWidget(self.sample_panel, stretch=2)
         
         # Reference View (Hidden by default)
+        self.ref_panel = QWidget()
+        self.ref_layout = QVBoxLayout(self.ref_panel)
+        self.ref_layout.setContentsMargins(0, 0, 0, 0)
+        self.ref_label = QLabel("Ref")
+        self.ref_layout.addWidget(self.ref_label)
         self.ref_view = CameraView()
-        self.ref_view.hide()
-        self.main_layout.addWidget(self.ref_view, stretch=2)
+        self.ref_layout.addWidget(self.ref_view)
+        self.ref_panel.hide()
+        self.main_layout.addWidget(self.ref_panel, stretch=2)
 
         # Right: Controls & Results
         self.right_panel = QWidget()
@@ -76,6 +96,8 @@ class MainWindow(QMainWindow):
         self.settings_panel.analysis_mode.currentTextChanged.connect(self.toggle_ref_view)
         self.settings_panel.ref_path.textChanged.connect(self.load_reference_preview)
         self.settings_panel.btn_apply_crop.clicked.connect(self.apply_crop_manually)
+        self.camera_view.clicked.connect(self.on_sample_view_clicked)
+        self.ref_view.clicked.connect(self.on_ref_view_clicked)
 
         # Initialize Camera
         self.camera.connect()
@@ -116,6 +138,9 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.envelope_action)
 
     def load_image(self):
+        self._open_image_for_target(self.active_image_target)
+
+    def _open_image_for_target(self, target="sample"):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.bmp *.tif *.tiff)")
         if file_name:
             # Stop live view to show loaded image
@@ -125,8 +150,13 @@ class MainWindow(QMainWindow):
             img = self._read_grayscale_image(file_name)
             
             if img is not None:
-                self.camera_view.update_image(img)
-                print(f"Loaded image: {file_name}, Shape: {img.shape}, Dtype: {img.dtype}")
+                if target == "ref":
+                    self.ref_view.update_image(img, force_autorange=True)
+                    self.settings_panel.ref_path.setText(file_name)
+                else:
+                    self.camera_view.update_image(img, force_autorange=True)
+                self._set_default_layout_for_image(img)
+                print(f"Loaded {target} image: {file_name}, Shape: {img.shape}, Dtype: {img.dtype}")
             else:
                 print("Failed to load image")
 
@@ -267,9 +297,13 @@ class MainWindow(QMainWindow):
 
     def toggle_ref_view(self, mode):
         if mode == "Relative":
-            self.ref_view.show()
+            self.ref_panel.show()
+            ref_img = self.ref_view.get_image()
+            if ref_img is not None:
+                self.ref_view.update_image(ref_img, force_autorange=True)
         else:
-            self.ref_view.hide()
+            self.ref_panel.hide()
+            self.active_image_target = "sample"
 
     def load_reference_preview(self, path):
         if not path:
@@ -277,7 +311,8 @@ class MainWindow(QMainWindow):
         try:
             img = self._read_grayscale_image(path)
             if img is not None:
-                self.ref_view.update_image(img)
+                self.ref_view.update_image(img, force_autorange=True)
+                self._set_default_layout_for_image(img)
             else:
                 print("Failed to load reference image")
         except Exception as e:
@@ -301,22 +336,87 @@ class MainWindow(QMainWindow):
     def _read_grayscale_image(self, path):
         """
         Robust image reader for GUI load/preview.
-        Handles OpenCV decode failures (e.g., unicode paths or some TIFF variants)
-        by falling back to PIL.
+        TIFFs are loaded without OpenCV first, because some TIFF variants
+        trigger OpenCV decoder failures.
         """
-        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-        if img is None:
+        img = None
+        suffix = Path(path).suffix.lower()
+
+        if suffix in (".tif", ".tiff"):
+            # 1) PIL first (handles most 8/16-bit TIFFs)
             try:
-                with Image.open(path) as pil_img:
-                    img = np.array(pil_img)
+                with warnings.catch_warnings():
+                    # Corrupt EXIF is not fatal for image pixel data.
+                    warnings.filterwarnings("ignore", category=UserWarning, module="PIL.TiffImagePlugin")
+                    with Image.open(path) as pil_img:
+                        img = np.array(pil_img)
             except Exception:
-                return None
+                img = None
+
+            # 2) tifffile fallback for special/compressed TIFFs
+            if img is None and tifffile is not None:
+                try:
+                    img = tifffile.imread(path)
+                except Exception:
+                    img = None
+            if img is None and tifffile is not None:
+                try:
+                    with tifffile.TiffFile(path) as tf:
+                        img = tf.asarray(key=0)
+                except Exception:
+                    img = None
+        else:
+            # For non-TIFF formats, decode from bytes to avoid path encoding issues.
+            try:
+                data = np.fromfile(path, dtype=np.uint8)
+                if data.size > 0:
+                    img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+            except Exception:
+                img = None
+
+        if img is None:
+            return None
+
+        # Handle stacks by selecting the first frame.
+        if img.ndim > 3:
+            img = img[0]
 
         if img.ndim == 3:
             if img.shape[2] >= 3:
                 # Works for RGB/BGR/RGBA by taking first 3 channels.
-                img = np.dot(img[..., :3], [0.114, 0.587, 0.299]).astype(img.dtype)
+                img = np.dot(img[..., :3], [0.114, 0.587, 0.299])
+                img = np.asarray(img, dtype=np.float32)
             else:
                 img = img[..., 0]
 
         return img
+
+    def _set_default_layout_for_image(self, img):
+        """
+        Resize the app and image panes to sensible defaults based on loaded image size.
+        """
+        if img is None or img.ndim < 2:
+            return
+        h, w = img.shape[:2]
+        scale = min(1.0, 720.0 / max(h, w))
+        img_w = max(320, min(int(w * scale), 760))
+        img_h = max(240, min(int(h * scale), 620))
+
+        self.camera_view.setMinimumSize(img_w, img_h)
+        self.ref_view.setMinimumSize(img_w, img_h)
+
+        n_views = 2 if self.ref_panel.isVisible() else 1
+        right_panel_w = 420
+        total_w = max(980, min(n_views * img_w + right_panel_w + 100, 1920))
+        total_h = max(680, min(img_h + 200, 1080))
+        self.resize(total_w, total_h)
+
+    def on_sample_view_clicked(self):
+        self.active_image_target = "sample"
+        if self.settings_panel.analysis_mode.currentText() == "Relative":
+            self._open_image_for_target("sample")
+
+    def on_ref_view_clicked(self):
+        self.active_image_target = "ref"
+        if self.settings_panel.analysis_mode.currentText() == "Relative":
+            self._open_image_for_target("ref")

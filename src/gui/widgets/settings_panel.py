@@ -47,7 +47,7 @@ class SettingsPanel(QWidget):
         self.period.setSingleStep(precision_step)
         self.period.setValue(4.8)
         self.period.setSuffix(" um")
-        self.layout.addRow("Period (Grating/Hole):", self.period)
+        self.layout.addRow("Ideal GT Period:", self.period)
 
         self.analysis_mode = QComboBox()
         self.analysis_mode.addItems(["Absolute", "Relative"])
@@ -81,20 +81,28 @@ class SettingsPanel(QWidget):
         self.layout.addRow(crop_group)
 
         # --- Talbot Specific ---
-        self.grating_type = QComboBox()
-        self.grating_type.addItems(["Checkerboard", "Grid"])
-        self.lbl_g_type = QLabel("Grating Type:")
-        self.layout.addRow(self.lbl_g_type, self.grating_type)
-
-        self.grating_angle = QComboBox()
-        self.grating_angle.addItems(["0", "45"])
-        self.lbl_g_angle = QLabel("Grating Angle:")
-        self.layout.addRow(self.lbl_g_angle, self.grating_angle)
-
         self.wavefront_type = QComboBox()
         self.wavefront_type.addItems(["Effective WF", "Real WF"])
         self.lbl_wf_type = QLabel("Wavefront:")
         self.layout.addRow(self.lbl_wf_type, self.wavefront_type)
+
+        self.source_dist_v = QDoubleSpinBox()
+        self.source_dist_v.setRange(-1e9, 1e9)
+        self.source_dist_v.setDecimals(precision_decimals)
+        self.source_dist_v.setSingleStep(precision_step)
+        self.source_dist_v.setValue(0.0)
+        self.source_dist_v.setSuffix(" m")
+        self.lbl_source_v = QLabel("Source Distance V:")
+        self.layout.addRow(self.lbl_source_v, self.source_dist_v)
+
+        self.source_dist_h = QDoubleSpinBox()
+        self.source_dist_h.setRange(-1e9, 1e9)
+        self.source_dist_h.setDecimals(precision_decimals)
+        self.source_dist_h.setSingleStep(precision_step)
+        self.source_dist_h.setValue(0.0)
+        self.source_dist_h.setSuffix(" m")
+        self.lbl_source_h = QLabel("Source Distance H:")
+        self.layout.addRow(self.lbl_source_h, self.source_dist_h)
 
         # --- Hartmann Specific ---
         self.plate_angle = QDoubleSpinBox()
@@ -142,7 +150,7 @@ class SettingsPanel(QWidget):
             self.save_path.setText(folder)
 
     def browse_ref(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Select Reference Image", "", "Images (*.png *.jpg *.bmp *.tif)")
+        file_name, _ = QFileDialog.getOpenFileName(self, "Select Reference Image", "", "Images (*.png *.jpg *.bmp *.tif *.tiff)")
         if file_name:
             self.ref_path.setText(file_name)
 
@@ -151,12 +159,12 @@ class SettingsPanel(QWidget):
         mode = self.mode_selector.currentText()
         is_talbot = (mode == "Talbot Interferometry")
         
-        self.grating_type.setVisible(is_talbot)
-        self.lbl_g_type.setVisible(is_talbot)
-        self.grating_angle.setVisible(is_talbot)
-        self.lbl_g_angle.setVisible(is_talbot)
         self.wavefront_type.setVisible(is_talbot)
         self.lbl_wf_type.setVisible(is_talbot)
+        self.source_dist_v.setVisible(is_talbot)
+        self.lbl_source_v.setVisible(is_talbot)
+        self.source_dist_h.setVisible(is_talbot)
+        self.lbl_source_h.setVisible(is_talbot)
         
         self.plate_angle.setVisible(not is_talbot)
         self.lbl_p_angle.setVisible(not is_talbot)
@@ -178,9 +186,9 @@ class SettingsPanel(QWidget):
             "correct_angle": self.correct_angle.isChecked(),
             "use_mask": self.use_mask.isChecked(),
             "crop": (self.crop_l.value(), self.crop_t.value(), self.crop_r.value(), self.crop_b.value()),
-            "grating_type": self.grating_type.currentText(),
-            "grating_angle": float(self.grating_angle.currentText()),
             "real_wf": self.wavefront_type.currentText() == "Real WF",
+            "source_distance_v_m": self.source_dist_v.value(),
+            "source_distance_h_m": self.source_dist_h.value(),
             "plate_angle": self.plate_angle.value(),
             "mask_threshold": self.mask_threshold.value(),
             "save_path": self.save_path.text(),

@@ -30,10 +30,27 @@ class TalbotProcessor(WavefrontProcessor):
         self.correct_angle = params.get("correct_angle", False)
         self.use_mask = params.get("use_mask", False)
         self.real_wf = params.get("real_wf", False)
+        source_distance_default_m = float(params.get("source_distance_m", 0.0))
+        if "source_distance_m" not in params and "source_distance_mm" in params:
+            source_distance_default_m = float(params.get("source_distance_mm", 0.0)) * 1e-3
+
+        if "source_distance_v_m" in params:
+            source_distance_v_m = float(params.get("source_distance_v_m", 0.0))
+        elif "source_distance_v_mm" in params:
+            source_distance_v_m = float(params.get("source_distance_v_mm", 0.0)) * 1e-3
+        else:
+            source_distance_v_m = source_distance_default_m
+
+        if "source_distance_h_m" in params:
+            source_distance_h_m = float(params.get("source_distance_h_m", 0.0))
+        elif "source_distance_h_mm" in params:
+            source_distance_h_m = float(params.get("source_distance_h_mm", 0.0)) * 1e-3
+        else:
+            source_distance_h_m = source_distance_default_m
+
+        self.source_d = [source_distance_v_m, source_distance_h_m]  # [V, H], meters
         self.crop_rect = params.get("crop", [0, 0, 0, 0])
         self.save_path = params.get("save_path", None)
-        self.grating_type = params.get("grating_type", "phase")  # phase or absorption
-        self.grating_angle = params.get("grating_angle", 0.0)  # in degrees
 
         print(self.crop_rect, self.gt_period, self.p_x)
 
@@ -74,9 +91,41 @@ class TalbotProcessor(WavefrontProcessor):
         print('\nCalculated real period from the image is: {}V {}H'.format(period_real[0]/self.p_x, period_real[1]/self.p_x), ' pixels')
         print('\nCalculated M factor from the image is: {}V {}H'.format(M_factor[0], M_factor[1]))
 
-        # use the real period to remove the effect of magnification for highly focused beam
-        self.gt_period_effect = period_real
-        # self.gt_period_effect = [self.gt_period, self.gt_period]
+        # Effective period selection:
+        # 1) If source distance is provided (>0), use geometric magnification.
+        # 2) If source distance is 0, keep the current method (measured period from image).
+        self.gt_period_effect = [0.0, 0.0]
+        self.period_source_model = [0.0, 0.0]
+        self.period_method = ["image", "image"]  # [V, H]
+
+        for i in range(2):
+            if abs(self.source_d[i]) > 1e-12:
+                period_model = self.gt_period * (1.0 + self.dist / self.source_d[i])
+                if period_model > 0:
+                    self.period_source_model[i] = period_model
+                    self.gt_period_effect[i] = period_model
+                    self.period_method[i] = "source_distance"
+                else:
+                    # Non-physical effective period from source model: fallback.
+                    self.period_source_model[i] = period_model
+                    self.gt_period_effect[i] = period_real[i]
+                    self.period_method[i] = "image_fallback"
+            else:
+                self.period_source_model[i] = self.gt_period
+                self.gt_period_effect[i] = period_real[i]
+
+        print(
+            "Effective period method [V,H]: {} / {}\n"
+            "Source model period [V,H] (um): {:.6f}, {:.6f}\n"
+            "Used effective period [V,H] (um): {:.6f}, {:.6f}".format(
+                self.period_method[0],
+                self.period_method[1],
+                self.period_source_model[0] * 1e6,
+                self.period_source_model[1] * 1e6,
+                self.gt_period_effect[0] * 1e6,
+                self.gt_period_effect[1] * 1e6,
+            )
+        )
 
         if self.mode == "absolute":
             
@@ -84,7 +133,7 @@ class TalbotProcessor(WavefrontProcessor):
         
         else:  # Relative
             ref_path = params.get("ref_image_path", params.get("ref_path", None))
-            if ref_path is None:
+            if not ref_path:
                 raise ValueError("Reference image path must be provided for Relative mode.")
             
             ref_image = load_image(ref_path)
@@ -146,6 +195,9 @@ class TalbotProcessor(WavefrontProcessor):
             "roc_x": roc_x,
             "roc_y": roc_y,
             "period_real": [period_real[0] * 1e6, period_real[1] * 1e6],
+            "period_effective": [self.gt_period_effect[0] * 1e6, self.gt_period_effect[1] * 1e6],
+            "source_distance_m": [self.source_d[0], self.source_d[1]],
+            "period_method": self.period_method,
             "source_wavefront_added": bool(self.real_wf)
         }
 
@@ -172,11 +224,11 @@ class TalbotProcessor(WavefrontProcessor):
         # use effective period for highly focused beam
 
         print('effect gt period ', self.gt_period_effect)
-        period_harm_Vert = np.int16(self.p_x/self.gt_period_effect[0]*M_shape[0])
-        period_harm_Hor = np.int16(self.p_x/self.gt_period_effect[1]*M_shape[1])
+        period_harm_Vert = max(2, int(round(self.p_x / self.gt_period_effect[0] * M_shape[0])))
+        period_harm_Hor = max(2, int(round(self.p_x / self.gt_period_effect[1] * M_shape[1])))
         # print(period_harm_Hor, period_harm_Vert)
         
-        searchRegion = [int(period_harm_Vert/2), int(period_harm_Hor/2)]
+        searchRegion = [max(1, int(period_harm_Vert / 2)), max(1, int(period_harm_Hor / 2))]
         
         img_fft = fft2(img)
 
@@ -282,8 +334,10 @@ class TalbotProcessor(WavefrontProcessor):
         dy = -arg10 /2 /np.pi
 
         # add back the source distance induced displacement
-        dx_diff = (np.arange(dx.shape[1]) - dx.shape[1]/2) * (self.p_x/period_harm_Hor*M_shape[1] - self.gt_period)/virtual_pixelsize[0]
-        dy_diff = (np.arange(dx.shape[0]) - dx.shape[0]/2) * (self.p_x/period_harm_Vert*M_shape[0] - self.gt_period)/virtual_pixelsize[1]
+        gt_period_effect_h = self.gt_period_effect[1]
+        gt_period_effect_v = self.gt_period_effect[0]
+        dx_diff = (np.arange(dx.shape[1]) - dx.shape[1] / 2.0) * (gt_period_effect_h - self.gt_period) / virtual_pixelsize[0]
+        dy_diff = (np.arange(dx.shape[0]) - dx.shape[0] / 2.0) * (gt_period_effect_v - self.gt_period) / virtual_pixelsize[1]
 
         XX_diff, YY_diff = np.meshgrid(dx_diff, dy_diff)
         dx_all = dx + XX_diff
@@ -483,6 +537,21 @@ class TalbotProcessor(WavefrontProcessor):
             self.p_x_bp = self.p_x
 
         prop_dist_range = np.arange(-dist_range/2, dist_range/2 + dist_step, dist_step)
+        n_steps = len(prop_dist_range)
+
+        # Memory guard for large upsampling/padding combinations.
+        # intensity_profiles will be float64 [steps, H, W].
+        output_est_bytes = n_steps * field.shape[0] * field.shape[1] * 8
+        available_bytes = int(params.get("available_memory_bytes", 0) or 0)
+        if available_bytes > 0:
+            backend_stack_ratio = float(params.get("backend_stack_ratio", 0.60))
+            safe_budget = int(available_bytes * backend_stack_ratio)
+            if output_est_bytes > safe_budget:
+                raise MemoryError(
+                    "Projected result stack is too large for available RAM. "
+                    f"Need ~{output_est_bytes/1024**3:.2f} GB; budget ~{safe_budget/1024**3:.2f} GB. "
+                    "Reduce upsampling/padding or increase step size."
+                )
 
         intensity_profiles = []
         L_z_list = []
@@ -500,8 +569,13 @@ class TalbotProcessor(WavefrontProcessor):
         # Use ThreadPoolExecutor to avoid multiprocessing issues on Windows (pickling, spawn overhead)
         # Numpy FFTs often release GIL, so threading provides speedup without the stability risks.
         max_workers = min(os.cpu_count() or 4, len(args_list), 16)
+        if available_bytes > 0:
+            # Rough working-set estimate per worker for propagation intermediates.
+            per_worker_bytes = max(1, int(field.shape[0] * field.shape[1] * 64))
+            worker_memory_ratio = float(params.get("worker_memory_ratio", 0.25))
+            mem_limited_workers = max(1, int((available_bytes * worker_memory_ratio) // per_worker_bytes))
+            max_workers = min(max_workers, mem_limited_workers)
         prColor('use ThreadPoolExecutor with {} workers for propagation'.format(max_workers), 'cyan')
-        results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             futures = [executor.submit(process_single_slice, arg) for arg in args_list]
@@ -515,21 +589,18 @@ class TalbotProcessor(WavefrontProcessor):
                     return None
                     
                 res = future.result() # This blocks until the specific task is done
-                results.append(res)
+                intensity, L_z, sx, sy, fx, fy, npx = res
+                intensity_profiles.append(intensity)
+                L_z_list.append(L_z)
+                sigma_x_list.append(sx)
+                sigma_y_list.append(sy)
+                fwhm_x_list.append(fx)
+                fwhm_y_list.append(fy)
+                new_p_x_list.append(npx)
                 
                 if progress_callback:
                     percent = (i + 1) / total_tasks * 100
                     progress_callback(percent)
-            
-        for res in results:
-            intensity, L_z, sx, sy, fx, fy, npx = res
-            intensity_profiles.append(intensity)
-            L_z_list.append(L_z)
-            sigma_x_list.append(sx)
-            sigma_y_list.append(sy)
-            fwhm_x_list.append(fx)
-            fwhm_y_list.append(fy)
-            new_p_x_list.append(npx)
         
         sigma_x_list = np.array(sigma_x_list)
         sigma_y_list = np.array(sigma_y_list)
