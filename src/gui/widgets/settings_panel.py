@@ -53,6 +53,10 @@ class SettingsPanel(QWidget):
         self.analysis_mode.addItems(["Absolute", "Relative"])
         self.layout.addRow("Analysis Mode:", self.analysis_mode)
 
+        self.run_mode = QComboBox()
+        self.run_mode.addItems(["Single", "Monitor"])
+        self.layout.addRow("Run Mode:", self.run_mode)
+
         self.correct_angle = QCheckBox("Correct Angle")
         self.layout.addRow(self.correct_angle)
 
@@ -128,7 +132,7 @@ class SettingsPanel(QWidget):
         self.btn_browse.clicked.connect(self.browse_folder)
         path_layout.addWidget(self.save_path)
         path_layout.addWidget(self.btn_browse)
-        self.layout.addRow("Save Path:", path_layout)
+        self.layout.addRow("Folder Path:", path_layout)
 
         # --- Reference Image (Relative Mode) ---
         self.ref_group = QGroupBox("Reference Image")
@@ -183,6 +187,7 @@ class SettingsPanel(QWidget):
             "distance_mm": self.distance.value(),
             "period_um": self.period.value(),
             "analysis_mode": self.analysis_mode.currentText(),
+            "run_mode": self.run_mode.currentText(),
             "correct_angle": self.correct_angle.isChecked(),
             "use_mask": self.use_mask.isChecked(),
             "crop": (self.crop_l.value(), self.crop_t.value(), self.crop_r.value(), self.crop_b.value()),

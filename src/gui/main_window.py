@@ -3,9 +3,12 @@ from PyQt6.QtGui import QAction
 from PyQt6.QtCore import QTimer
 import cv2
 import numpy as np
+import os
+import json
 from PIL import Image
 import warnings
 from pathlib import Path
+from datetime import datetime
 
 try:
     import tifffile
@@ -38,6 +41,9 @@ class MainWindow(QMainWindow):
         self.current_processor = self.processors["Talbot Interferometry"]
         self.live_mode = False
         self.active_image_target = "sample"
+        self.monitor_mode_active = False
+        self.monitor_folder = ""
+        self.monitor_seen_files = set()
         
         # State for tools
         self.saved_image_before_period = None
@@ -94,10 +100,13 @@ class MainWindow(QMainWindow):
         # Connect signals
         self.settings_panel.mode_selector.currentTextChanged.connect(self.change_mode)
         self.settings_panel.analysis_mode.currentTextChanged.connect(self.toggle_ref_view)
+        self.settings_panel.analysis_mode.currentTextChanged.connect(self.on_analysis_mode_changed)
+        self.settings_panel.run_mode.currentTextChanged.connect(self.on_run_mode_changed)
         self.settings_panel.ref_path.textChanged.connect(self.load_reference_preview)
         self.settings_panel.btn_apply_crop.clicked.connect(self.apply_crop_manually)
         self.camera_view.clicked.connect(self.on_sample_view_clicked)
         self.ref_view.clicked.connect(self.on_ref_view_clicked)
+        self.on_run_mode_changed(self.settings_panel.run_mode.currentText())
 
         # Initialize Camera
         self.camera.connect()
@@ -106,6 +115,11 @@ class MainWindow(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_live_view)
         self.timer.start(100) # 10 FPS
+
+        # Folder monitor timer
+        self.monitor_timer = QTimer()
+        self.monitor_timer.timeout.connect(self.check_monitor_folder)
+        self.monitor_timer.setInterval(2000)
 
     def setup_menus(self):
         menu_bar = self.menuBar()
@@ -194,6 +208,12 @@ class MainWindow(QMainWindow):
 
     def snap_and_process(self):
         try:
+            settings = self.settings_panel.get_settings()
+            run_mode = settings.get("run_mode", "Single")
+            if run_mode == "Monitor":
+                self.toggle_monitor_mode(settings)
+                return
+
             # If live, grab fresh frame. If not (loaded image), use current display
             if self.live_mode:
                 img = self.camera.snap()
@@ -208,9 +228,6 @@ class MainWindow(QMainWindow):
                 print("No image to process")
                 return
 
-            # Get settings from panel
-            settings = self.settings_panel.get_settings()
-            
             # Hartmann Mask Preview Step
             if isinstance(self.current_processor, HartmannProcessor):
                 pitch_um = settings.get("period_um", 150.0)
@@ -232,6 +249,17 @@ class MainWindow(QMainWindow):
             # Open Analysis Window
             self.analysis_window = AnalysisResultWindow(self.current_processor, results)
             self.analysis_window.show()
+
+            # Save results if a folder path is provided
+            if settings.get("save_path", "").strip():
+                self.save_analysis_results(
+                    results=results,
+                    settings=settings,
+                    output_folder=settings["save_path"],
+                    image_stem="manual",
+                    is_monitor=False,
+                    source_image_path=None,
+                )
             
         except Exception as e:
             print(f"Processing Error: {e}")
@@ -239,6 +267,8 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
 
     def closeEvent(self, event):
+        if self.monitor_mode_active:
+            self.stop_monitor_mode()
         self.camera.disconnect()
         event.accept()
 
@@ -304,6 +334,20 @@ class MainWindow(QMainWindow):
         else:
             self.ref_panel.hide()
             self.active_image_target = "sample"
+
+    def on_analysis_mode_changed(self, mode):
+        if mode != "Relative":
+            self.active_image_target = "sample"
+
+    def on_run_mode_changed(self, mode):
+        if mode == "Monitor":
+            self.btn_snap.setText("Start Monitor")
+            if self.live_mode:
+                self.toggle_live()
+        else:
+            if self.monitor_mode_active:
+                self.stop_monitor_mode()
+            self.btn_snap.setText("Snap & Analyze")
 
     def load_reference_preview(self, path):
         if not path:
@@ -420,3 +464,162 @@ class MainWindow(QMainWindow):
         self.active_image_target = "ref"
         if self.settings_panel.analysis_mode.currentText() == "Relative":
             self._open_image_for_target("ref")
+
+    def toggle_monitor_mode(self, settings):
+        if settings.get("run_mode", "Single") != "Monitor":
+            return
+
+        if self.monitor_mode_active:
+            self.stop_monitor_mode()
+            return
+
+        folder = settings.get("save_path", "").strip()
+        if not folder:
+            print("Monitor mode needs Folder Path.")
+            return
+        if not os.path.isdir(folder):
+            print(f"Monitor folder does not exist: {folder}")
+            return
+
+        self.monitor_folder = folder
+        self.monitor_seen_files = set(self._list_tiff_files(folder))
+        self.monitor_mode_active = True
+        self.monitor_timer.start()
+        self.btn_snap.setText("Stop Monitor")
+        print(f"Monitor started: {folder}")
+
+    def stop_monitor_mode(self):
+        self.monitor_mode_active = False
+        self.monitor_timer.stop()
+        self.btn_snap.setText("Start Monitor")
+        print("Monitor stopped.")
+
+    def _list_tiff_files(self, folder):
+        p = Path(folder)
+        files = list(p.glob("*.tif")) + list(p.glob("*.tiff")) + list(p.glob("*.TIF")) + list(p.glob("*.TIFF"))
+        return sorted([str(f) for f in files], key=lambda x: os.path.getmtime(x))
+
+    def check_monitor_folder(self):
+        if not self.monitor_mode_active:
+            return
+        if not self.monitor_folder or not os.path.isdir(self.monitor_folder):
+            print("Monitor folder unavailable; stopping monitor.")
+            self.stop_monitor_mode()
+            return
+
+        current_files = self._list_tiff_files(self.monitor_folder)
+        new_files = [f for f in current_files if f not in self.monitor_seen_files]
+        for file_path in new_files:
+            self.monitor_seen_files.add(file_path)
+            self.process_monitor_file(file_path)
+
+    def process_monitor_file(self, file_path):
+        try:
+            img = self._read_grayscale_image(file_path)
+            if img is None:
+                print(f"Monitor skip (cannot load): {file_path}")
+                return
+
+            self.camera_view.update_image(img, force_autorange=True)
+            self._set_default_layout_for_image(img)
+
+            settings = self.settings_panel.get_settings()
+            results = self.current_processor.process(img, params=settings)
+
+            self.save_analysis_results(
+                results=results,
+                settings=settings,
+                output_folder=self.monitor_folder,
+                image_stem=Path(file_path).stem,
+                is_monitor=True,
+                source_image_path=file_path,
+            )
+            print(f"Monitor processed: {file_path}")
+        except Exception as e:
+            print(f"Monitor processing error ({file_path}): {e}")
+
+    def save_analysis_results(self, results, settings, output_folder, image_stem, is_monitor=False, source_image_path=None):
+        if not output_folder:
+            return
+        os.makedirs(output_folder, exist_ok=True)
+
+        tag = "monitor" if is_monitor else "manual"
+        prefix = f"{image_stem}_{tag}"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = f"{prefix}_{timestamp}"
+
+        saved_files = {}
+        for key, suffix in [
+            ("phase_map", "phase"),
+            ("phase_residual_2nd", "phase_residual_2nd"),
+            ("transmission", "transmission"),
+            ("displacement_x", "disp_x"),
+            ("displacement_y", "disp_y"),
+        ]:
+            arr = results.get(key)
+            out = self._save_array(output_folder, f"{base}_{suffix}", arr)
+            if out:
+                saved_files[key] = out
+
+        run_data = {
+            "run_name": base,
+            "image_stem": image_stem,
+            "is_monitor": bool(is_monitor),
+            "source_image_path": source_image_path,
+            "timestamp": timestamp,
+            "processor": getattr(self.current_processor, "name", str(type(self.current_processor))),
+            "settings": self._jsonify(settings),
+            "results_scalar": self._extract_scalar_results(results),
+            "saved_files": saved_files,
+        }
+        json_path = os.path.join(output_folder, f"{base}_params.json")
+        with open(json_path, "w", encoding="utf-8") as fp:
+            json.dump(run_data, fp, indent=2, ensure_ascii=False)
+        print(f"Saved result json: {json_path}")
+
+    def _save_array(self, folder, base_name, arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        if arr.size == 0:
+            return None
+
+        if arr.ndim == 2:
+            path = os.path.join(folder, f"{base_name}.tiff")
+            if tifffile is not None:
+                tifffile.imwrite(path, arr.astype(np.float32))
+            else:
+                Image.fromarray(arr.astype(np.float32)).save(path)
+            return path
+
+        path = os.path.join(folder, f"{base_name}.npy")
+        np.save(path, arr)
+        return path
+
+    def _extract_scalar_results(self, results):
+        scalar = {}
+        for k, v in results.items():
+            if isinstance(v, (int, float, str, bool)):
+                scalar[k] = v
+            elif isinstance(v, (list, tuple)) and all(isinstance(x, (int, float, str, bool)) for x in v):
+                scalar[k] = list(v)
+            elif isinstance(v, np.ndarray) and v.size == 1:
+                scalar[k] = float(v.ravel()[0])
+        return scalar
+
+    def _jsonify(self, obj):
+        if isinstance(obj, dict):
+            return {str(k): self._jsonify(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._jsonify(v) for v in obj]
+        if isinstance(obj, np.ndarray):
+            if obj.size <= 64:
+                return obj.tolist()
+            return {"type": "ndarray", "shape": list(obj.shape), "dtype": str(obj.dtype)}
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        return obj
