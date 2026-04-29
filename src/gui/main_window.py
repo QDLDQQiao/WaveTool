@@ -44,6 +44,8 @@ class MainWindow(QMainWindow):
         self.monitor_mode_active = False
         self.monitor_folder = ""
         self.monitor_seen_files = set()
+        self.last_results = None
+        self.last_settings = None
         
         # State for tools
         self.saved_image_before_period = None
@@ -88,6 +90,10 @@ class MainWindow(QMainWindow):
         self.btn_snap = QPushButton("Snap & Analyze")
         self.btn_snap.clicked.connect(self.snap_and_process)
         self.right_layout.addWidget(self.btn_snap)
+
+        self.btn_save_result = QPushButton("Save Result")
+        self.btn_save_result.clicked.connect(self.save_current_result)
+        self.right_layout.addWidget(self.btn_save_result)
         
         self.btn_live = QPushButton("Toggle Live View")
         self.btn_live.clicked.connect(self.toggle_live)
@@ -245,6 +251,8 @@ class MainWindow(QMainWindow):
             
             # Pass settings to processor
             results = self.current_processor.process(img, params=settings)
+            self.last_results = results
+            self.last_settings = settings.copy()
             
             # Open Analysis Window
             self.analysis_window = AnalysisResultWindow(self.current_processor, results)
@@ -265,6 +273,35 @@ class MainWindow(QMainWindow):
             print(f"Processing Error: {e}")
             import traceback
             traceback.print_exc()
+
+    def save_current_result(self):
+        if self.last_results is None or self.last_settings is None:
+            print("No processed result to save. Please run Analyze first.")
+            return
+
+        output_folder = self.last_settings.get("save_path", "").strip()
+        if not output_folder:
+            output_folder = QFileDialog.getExistingDirectory(self, "Select Save Folder")
+            if not output_folder:
+                return
+
+        run_name = f"manual_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        try:
+            if hasattr(self, "analysis_window") and self.analysis_window is not None:
+                files = self.analysis_window.save_result_bundle(output_folder, run_name, self.last_settings)
+            else:
+                # fallback: generate a minimal package
+                files = self.save_analysis_results(
+                    results=self.last_results,
+                    settings=self.last_settings,
+                    output_folder=output_folder,
+                    image_stem=run_name,
+                    is_monitor=False,
+                    source_image_path=None,
+                )
+            print(f"Save Result done: {output_folder}")
+        except Exception as e:
+            print(f"Save Result error: {e}")
 
     def closeEvent(self, event):
         if self.monitor_mode_active:
