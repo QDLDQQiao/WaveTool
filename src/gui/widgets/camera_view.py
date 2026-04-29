@@ -49,16 +49,10 @@ class CameraView(QWidget):
         
         # Apply crop if valid
         if crop_rect and any(crop_rect):
-            l, t, r, b = map(int, crop_rect)
             h, w = image_data.shape
-            # Ensure bounds
-            l = max(0, l)
-            t = max(0, t)
-            r = min(w, r) if r > 0 else w
-            b = min(h, b) if b > 0 else h
-            
-            if r > l and b > t:
-                display_data = image_data[t:b, l:r]
+            (x0, x1), (y0, y1) = self._resolve_crop_bounds(crop_rect, h, w)
+            if x1 > x0 and y1 > y0:
+                display_data = image_data[y0:y1, x0:x1]
 
         self.current_image = image_data # Store raw full image
         # autoRange=False keeps the zoom level if user changed it
@@ -86,3 +80,34 @@ class CameraView(QWidget):
 
     def get_image(self):
         return self.current_image
+
+    def _resolve_crop_bounds(self, crop_rect, h, w):
+        l = int(crop_rect[0]) if len(crop_rect) > 0 else 0
+        t = int(crop_rect[1]) if len(crop_rect) > 1 else 0
+        r = int(crop_rect[2]) if len(crop_rect) > 2 else 0
+        b = int(crop_rect[3]) if len(crop_rect) > 3 else 0
+
+        l = max(0, l)
+        t = max(0, t)
+        r = max(0, r)
+        b = max(0, b)
+
+        # Absolute mode
+        x0_abs = min(max(l, 0), w)
+        x1_abs = min(max(r, 0), w) if r > 0 else w
+        y0_abs = min(max(t, 0), h)
+        y1_abs = min(max(b, 0), h) if b > 0 else h
+        abs_valid = (x1_abs > x0_abs) and (y1_abs > y0_abs)
+
+        # Margin mode
+        x0_m = min(max(l, 0), w)
+        x1_m = max(x0_m, w - r if r > 0 else w)
+        y0_m = min(max(t, 0), h)
+        y1_m = max(y0_m, h - b if b > 0 else h)
+        margin_valid = (x1_m > x0_m) and (y1_m > y0_m)
+
+        if (not abs_valid and margin_valid) or (r <= l and b <= t and margin_valid):
+            return (x0_m, x1_m), (y0_m, y1_m)
+        if abs_valid:
+            return (x0_abs, x1_abs), (y0_abs, y1_abs)
+        return (0, w), (0, h)

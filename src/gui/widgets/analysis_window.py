@@ -74,7 +74,7 @@ class AnalysisResultWindow(QWidget):
         self.btn_recalc_zernike.clicked.connect(self.update_zernike)
         top_layout.addWidget(self.btn_recalc_zernike)
 
-        phase_for_shape = results.get("phase_map")
+        phase_for_shape = results.get("phase_residual_2nd", results.get("phase_map"))
         nx = int(phase_for_shape.shape[1]) if isinstance(phase_for_shape, np.ndarray) and phase_for_shape.ndim == 2 else 1
         ny = int(phase_for_shape.shape[0]) if isinstance(phase_for_shape, np.ndarray) and phase_for_shape.ndim == 2 else 1
 
@@ -118,7 +118,7 @@ class AnalysisResultWindow(QWidget):
         self.add_plot(self.grid_main, 1, 0, "Integrated Phase", results.get('phase_map'), cmap='jet')
         self.add_plot(self.grid_main, 1, 1, "Residual (2nd Order Removed)", results.get('phase_residual_2nd'), cmap='jet')
         self.add_plot(self.grid_main, 1, 2, "Analysis Mask", results.get('mask'), cmap='gray')
-        self.add_line_cut_plot(self.grid_main, 2, 0, "Phase Line Cut (X/Y)", results.get('phase_map'))
+        self.add_line_cut_plot(self.grid_main, 2, 0, "Residual Phase Line Cut (X/Y)", results.get('phase_residual_2nd', results.get('phase_map')))
         self.tabs.addTab(self.tab_main, "Main Results")
 
         # Tab 2: Zernike
@@ -218,7 +218,7 @@ class AnalysisResultWindow(QWidget):
         self.update_line_cut_plot()
 
     def update_line_cut_plot(self):
-        phase = self.results.get("phase_map")
+        phase = self.results.get("phase_residual_2nd", self.results.get("phase_map"))
         if phase is None or not hasattr(self, "line_fig"):
             return
         y = int(self.spin_line_y.value())
@@ -234,7 +234,7 @@ class AnalysisResultWindow(QWidget):
         self.line_ax.clear()
         self.line_ax.plot(xs, line_x, lw=1.5, label=f"X-cut @ Y={y}")
         self.line_ax.plot(ys, line_y, lw=1.5, label=f"Y-cut @ X={x}")
-        self.line_ax.set_title("Phase Line Cut")
+        self.line_ax.set_title("Residual Phase Line Cut")
         self.line_ax.set_xlabel("Pixel Index")
         self.line_ax.set_ylabel("Phase (rad)")
         self.line_ax.legend(loc="best", fontsize=9)

@@ -55,14 +55,7 @@ class TalbotProcessor(WavefrontProcessor):
         print(self.crop_rect, self.gt_period, self.p_x)
 
         M_shape = image.shape
-        if self.crop_rect[0] + self.crop_rect[2]> 0:
-            x_crop = [self.crop_rect[0], self.crop_rect[2]]
-        else:
-            x_crop = [0, M_shape[1]]
-        if self.crop_rect[1] + self.crop_rect[3]> 0:
-            y_crop = [self.crop_rect[1], self.crop_rect[3]]
-        else:
-            y_crop = [0, M_shape[0]]
+        x_crop, y_crop = self._resolve_crop_bounds(self.crop_rect, M_shape)
 
         img_crop = lambda img: img[int(y_crop[0]):int(y_crop[1]),
                 int(x_crop[0]):int(x_crop[1])] 
@@ -70,6 +63,13 @@ class TalbotProcessor(WavefrontProcessor):
         image = img_crop(image)
         
         print('image crop size: ', image.shape)
+        if image.size == 0 or image.shape[0] < 2 or image.shape[1] < 2:
+            raise ValueError(
+                "Crop produced an empty/too-small image. "
+                "Use either absolute bounds (L<T, R>B with R>L, B>T) "
+                "or margin mode (L,T,right_margin,bottom_margin). "
+                f"Input crop={self.crop_rect}, resolved x={x_crop}, y={y_crop}, shape={M_shape}"
+            )
 
         # Wavelength (m) = 1.2398e-9 / E(keV)
         self.wavelength = sc.value('inverse meter-electron volt relationship') / self.energy
@@ -85,15 +85,25 @@ class TalbotProcessor(WavefrontProcessor):
             mask_threshold = 0.05
             mask = np.ones(img_filter.shape) * ((img_filter-img_filter.min()) > mask_threshold*(img_filter.max()-img_filter.min()))
 
-        angle_error, period_real = self.find_rotation_angle(self.p_x, self.gt_period, image)
+        # Use source-distance model as search seed when available, otherwise ideal period.
+        nonzero_source = [abs(s) > 1e-12 for s in self.source_d]
+        if any(nonzero_source):
+            p_seed_list = [abs(self.gt_period * (1.0 + self.dist / s)) for s in self.source_d if abs(s) > 1e-12]
+            period_seed = float(np.mean(p_seed_list))
+        else:
+            period_seed = self.gt_period
+
+        angle_error, period_real = self.find_rotation_angle(self.p_x, period_seed, image, calculate_angle=self.correct_angle)
 
         M_factor = [period_real[0] / self.gt_period, period_real[1] / self.gt_period]
         print('\nCalculated real period from the image is: {}V {}H'.format(period_real[0]/self.p_x, period_real[1]/self.p_x), ' pixels')
         print('\nCalculated M factor from the image is: {}V {}H'.format(M_factor[0], M_factor[1]))
 
         # Effective period selection:
-        # 1) If source distance is provided (>0), use geometric magnification.
-        # 2) If source distance is 0, keep the current method (measured period from image).
+        # 1) If source distance is provided (!=0), use geometric magnification
+        #    from ideal period p0: p_eff = p0 * (1 + L / R),
+        #    where L is grating-detector distance and R is source distance.
+        # 2) If source distance is 0, keep the current image-based method.
         self.gt_period_effect = [0.0, 0.0]
         self.period_source_model = [0.0, 0.0]
         self.period_method = ["image", "image"]  # [V, H]
@@ -101,15 +111,10 @@ class TalbotProcessor(WavefrontProcessor):
         for i in range(2):
             if abs(self.source_d[i]) > 1e-12:
                 period_model = self.gt_period * (1.0 + self.dist / self.source_d[i])
-                if period_model > 0:
-                    self.period_source_model[i] = period_model
-                    self.gt_period_effect[i] = period_model
-                    self.period_method[i] = "source_distance"
-                else:
-                    # Non-physical effective period from source model: fallback.
-                    self.period_source_model[i] = period_model
-                    self.gt_period_effect[i] = period_real[i]
-                    self.period_method[i] = "image_fallback"
+                self.period_source_model[i] = period_model
+                # Period magnitude is physically positive for harmonic spacing.
+                self.gt_period_effect[i] = abs(period_model)
+                self.period_method[i] = "source_distance"
             else:
                 self.period_source_model[i] = self.gt_period
                 self.gt_period_effect[i] = period_real[i]
@@ -159,7 +164,8 @@ class TalbotProcessor(WavefrontProcessor):
         phase = frankotchellappa(dx * self.p_x**2, dy * self.p_x**2) / self.wavelength /self.dist *2*np.pi
 
         # --- 2nd Order Removal ---
-        _, residual_2nd, coeffs_2nd = fit_remove_2nd_order(phase)
+        fit_mask = (mask > 0) if self.use_mask else None
+        _, residual_2nd, coeffs_2nd = fit_remove_2nd_order(phase, mask=fit_mask)
         
         # Calculate Radius of Curvature (ROC)
         # Phase phi(x) approx - pi * x^2 / (lambda * R)
@@ -178,7 +184,13 @@ class TalbotProcessor(WavefrontProcessor):
 
         # --- Zernike Analysis ---
         zernike_order = params.get("zernike_order", 15)
-        zernike_coeffs, zernike_fitted, zernike_residual = fit_zernike(phase, n_terms=zernike_order)
+        zernike_coeffs, zernike_fitted, zernike_residual = fit_zernike(phase, n_terms=zernike_order, mask=fit_mask)
+
+        # Display results only within mask when requested.
+        if self.use_mask:
+            residual_2nd = np.where(mask > 0, residual_2nd, np.nan)
+            zernike_fitted = np.where(mask > 0, zernike_fitted, np.nan)
+            zernike_residual = np.where(mask > 0, zernike_residual, np.nan)
 
         return {
             "type": "Talbot",
@@ -190,6 +202,7 @@ class TalbotProcessor(WavefrontProcessor):
             "zernike_coeffs": zernike_coeffs[1:],
             "zernike_fitted": zernike_fitted,
             "zernike_residual": zernike_residual,
+            "mask": mask.astype(np.float32) if self.use_mask else np.ones_like(phase, dtype=np.float32),
             "pv_value": np.ptp(residual_2nd),
             "rms_value": np.std(residual_2nd),
             "roc_x": roc_x,
@@ -224,11 +237,23 @@ class TalbotProcessor(WavefrontProcessor):
         # use effective period for highly focused beam
 
         print('effect gt period ', self.gt_period_effect)
-        period_harm_Vert = max(2, int(round(self.p_x / self.gt_period_effect[0] * M_shape[0])))
-        period_harm_Hor = max(2, int(round(self.p_x / self.gt_period_effect[1] * M_shape[1])))
+        period_harm_Vert, info_v = self._harmonic_index_from_period(self.gt_period_effect[0], M_shape[0], "V")
+        period_harm_Hor, info_h = self._harmonic_index_from_period(self.gt_period_effect[1], M_shape[1], "H")
         # print(period_harm_Hor, period_harm_Vert)
         
-        searchRegion = [max(1, int(period_harm_Vert / 2)), max(1, int(period_harm_Hor / 2))]
+        searchRegion = [
+            max(1, min(int(period_harm_Vert / 2), M_shape[0] // 4)),
+            max(1, min(int(period_harm_Hor / 2), M_shape[1] // 4)),
+        ]
+        print(
+            "[grating_2D] harmonic position (px from center): "
+            f"V={period_harm_Vert} (f={info_v['f_raw']:.4f}, f_alias={info_v['f_alias']:.4f}), "
+            f"H={period_harm_Hor} (f={info_h['f_raw']:.4f}, f_alias={info_h['f_alias']:.4f})"
+        )
+        print(
+            f"[grating_2D] FFT search window half-size: "
+            f"V={searchRegion[0]} px, H={searchRegion[1]} px; image shape={M_shape}"
+        )
         
         img_fft = fft2(img)
 
@@ -240,10 +265,16 @@ class TalbotProcessor(WavefrontProcessor):
             # find center for vertical
             maskSearchRegion = np.zeros(M_shape)
 
-            maskSearchRegion[idx_peak[0] - searchRegion[0]:
-                            idx_peak[0] + searchRegion[0],
-                            idx_peak[1] - searchRegion[1]:
-                            idx_peak[1] + searchRegion[1]] = 1.0
+            y0s = max(0, idx_peak[0] - searchRegion[0])
+            y1s = min(M_shape[0], idx_peak[0] + searchRegion[0])
+            x0s = max(0, idx_peak[1] - searchRegion[1])
+            x1s = min(M_shape[1], idx_peak[1] + searchRegion[1])
+            if y1s <= y0s or x1s <= x0s:
+                raise ValueError(
+                    f"Invalid search region for harmonic {Harm}. "
+                    f"idx_peak={idx_peak}, searchRegion={searchRegion}, shape={M_shape}"
+                )
+            maskSearchRegion[y0s:y1s, x0s:x1s] = 1.0
 
             idxPeak_ij_exp = np.where(np.abs(im_fft) * maskSearchRegion ==
                                     np.max(np.abs(im_fft) * maskSearchRegion)) 
@@ -251,8 +282,17 @@ class TalbotProcessor(WavefrontProcessor):
             prColor('searched peak position: {}(vertical) {}(horizontal)\nerror of harmonic position: {}(vertical) {}(horizontal)'.format(idxPeak_ij_exp[0][0], idxPeak_ij_exp[1][0], (idxPeak_ij_exp[0][0]-idx_peak[0]), (idxPeak_ij_exp[1][0]-idx_peak[1])), 'green')
             # if True:
             #     idx_peak = [idxPeak_ij_exp[0][0], idxPeak_ij_exp[1][0]]
-            sub_img_fft = im_fft[idx_peak[0] - period_harm_Vert//2:idx_peak[0] + period_harm_Vert//2,
-                                idx_peak[1] - period_harm_Hor//2:idx_peak[1] + period_harm_Hor//2]
+            y0 = max(0, idx_peak[0] - period_harm_Vert // 2)
+            y1 = min(M_shape[0], idx_peak[0] + period_harm_Vert // 2)
+            x0 = max(0, idx_peak[1] - period_harm_Hor // 2)
+            x1 = min(M_shape[1], idx_peak[1] + period_harm_Hor // 2)
+            if y1 <= y0 or x1 <= x0:
+                raise ValueError(
+                    f"Invalid FFT window for harmonic {Harm}. "
+                    f"window=({y0}:{y1}, {x0}:{x1}), idx_peak={idx_peak}, "
+                    f"period_harm=({period_harm_Vert}, {period_harm_Hor}), shape={M_shape}"
+                )
+            sub_img_fft = im_fft[y0:y1, x0:x1]
 
             # use the peak position to get the relative angle to the X-Y axis
             
@@ -265,11 +305,14 @@ class TalbotProcessor(WavefrontProcessor):
                 angle_error = 0
                 return ifft2(sub_img_fft)
         
-        # calculate the rotation angle first
-        _, angle_error01 = extract_subimage(img_fft, Harm=(0, 1), calculate_angle=True)
-        _, angle_error10 = extract_subimage(img_fft, Harm=(1, 0), calculate_angle=True)
-        angle_error = (angle_error01 - angle_error10)/2
-        prColor('angle error of the grating image: \n 01:{}; 10:{}\naverage angle error: {}'.format(angle_error01/np.pi*180, angle_error10/np.pi*180, angle_error/np.pi*180), 'cyan')
+        # calculate rotation only when requested
+        if self.correct_angle:
+            _, angle_error01 = extract_subimage(img_fft, Harm=(0, 1), calculate_angle=True)
+            _, angle_error10 = extract_subimage(img_fft, Harm=(1, 0), calculate_angle=True)
+            angle_error = (angle_error01 - angle_error10)/2
+            prColor('angle error of the grating image: \n 01:{}; 10:{}\naverage angle error: {}'.format(angle_error01/np.pi*180, angle_error10/np.pi*180, angle_error/np.pi*180), 'cyan')
+        else:
+            angle_error = 0.0
         
         if self.correct_angle:
             img_rot = snd.rotate(img, angle_error/np.pi*180, reshape=False, order=3)
@@ -374,11 +417,23 @@ class TalbotProcessor(WavefrontProcessor):
         return [dx_used, dy_used], [dx, dy], [diffPhase01, diffPhase10], phase - np.amin(phase), [darkField01, darkField10], int00, virtual_pixelsize
     
     
-    def find_rotation_angle(self, p_x, period, img):
+    def find_rotation_angle(self, p_x, period, img, calculate_angle=True):
         # find the rotation angle
         M_shape = img.shape
-        period_harm = [int(p_x/period*M_shape[0]), int(p_x/period*M_shape[1])]
-        searchRegion = [int(period_harm[0]/2), int(period_harm[1]/2)]
+        period_harm_v, info_v = self._harmonic_index_from_period(period, M_shape[0], "V")
+        period_harm_h, info_h = self._harmonic_index_from_period(period, M_shape[1], "H")
+        period_harm = [period_harm_v, period_harm_h]
+        searchRegion = [max(1, min(int(period_harm[0]/2), M_shape[0] // 4)),
+                        max(1, min(int(period_harm[1]/2), M_shape[1] // 4))]
+        print(
+            "[find_rotation_angle] harmonic position (px from center): "
+            f"V={period_harm_v} (f={info_v['f_raw']:.4f}, f_alias={info_v['f_alias']:.4f}), "
+            f"H={period_harm_h} (f={info_h['f_raw']:.4f}, f_alias={info_h['f_alias']:.4f})"
+        )
+        print(
+            f"[find_rotation_angle] FFT search window half-size: "
+            f"V={searchRegion[0]} px, H={searchRegion[1]} px; image shape={M_shape}"
+        )
 
         img_fft = fft2(img)
 
@@ -390,10 +445,16 @@ class TalbotProcessor(WavefrontProcessor):
             # find center for vertical
             maskSearchRegion = np.zeros(M_shape)
 
-            maskSearchRegion[idx_peak[0] - searchRegion[0]:
-                            idx_peak[0] + searchRegion[0],
-                            idx_peak[1] - searchRegion[1]:
-                            idx_peak[1] + searchRegion[1]] = 1.0
+            y0s = max(0, idx_peak[0] - searchRegion[0])
+            y1s = min(M_shape[0], idx_peak[0] + searchRegion[0])
+            x0s = max(0, idx_peak[1] - searchRegion[1])
+            x1s = min(M_shape[1], idx_peak[1] + searchRegion[1])
+            if y1s <= y0s or x1s <= x0s:
+                raise ValueError(
+                    f"Invalid rotation-angle search region for harmonic {Harm}. "
+                    f"idx_peak={idx_peak}, searchRegion={searchRegion}, shape={M_shape}"
+                )
+            maskSearchRegion[y0s:y1s, x0s:x1s] = 1.0
 
             idxPeak_ij_exp = np.where(np.abs(im_fft) * maskSearchRegion ==
                                     np.max(np.abs(im_fft) * maskSearchRegion)) 
@@ -402,8 +463,17 @@ class TalbotProcessor(WavefrontProcessor):
 
             # if True:
             #     idx_peak = [idxPeak_ij_exp[0][0], idxPeak_ij_exp[1][0]]
-            sub_img_fft = im_fft[idx_peak[0] - period_harm[0]//2:idx_peak[0] + period_harm[0]//2,
-                                idx_peak[1] - period_harm[1]//2:idx_peak[1] + period_harm[1]//2]
+            y0 = max(0, idx_peak[0] - period_harm[0] // 2)
+            y1 = min(M_shape[0], idx_peak[0] + period_harm[0] // 2)
+            x0 = max(0, idx_peak[1] - period_harm[1] // 2)
+            x1 = min(M_shape[1], idx_peak[1] + period_harm[1] // 2)
+            if y1 <= y0 or x1 <= x0:
+                raise ValueError(
+                    f"Invalid rotation-angle FFT window for harmonic {Harm}. "
+                    f"window=({y0}:{y1}, {x0}:{x1}), idx_peak={idx_peak}, "
+                    f"period_harm={period_harm}, shape={M_shape}"
+                )
+            sub_img_fft = im_fft[y0:y1, x0:x1]
 
             # use the peak position to get the relative angle to the X-Y axis
             angle_error = np.arctan((Harm[1] * (idxPeak_ij_exp[0][0] - M_shape[0] // 2) + Harm[0] * (idxPeak_ij_exp[1][0] - M_shape[1] // 2)) / (Harm[0] * (idxPeak_ij_exp[0][0] - M_shape[0] // 2) + Harm[1] * (idxPeak_ij_exp[1][0] - M_shape[1] // 2)))
@@ -413,8 +483,11 @@ class TalbotProcessor(WavefrontProcessor):
 
         _, angle_error01, peak_error01 = extract_subimage(img_fft, Harm=(0, 1))
         _, angle_error10, peak_error10 = extract_subimage(img_fft, Harm=(1, 0))
-        angle_error = (angle_error01 - angle_error10)/2
-        print('angle error of the grating image: \n 01:{}; 10:{}\naverage angle error: {}'.format(angle_error01/np.pi*180, angle_error10/np.pi*180, angle_error/np.pi*180))    
+        if calculate_angle:
+            angle_error = (angle_error01 - angle_error10)/2
+            print('angle error of the grating image: \n 01:{}; 10:{}\naverage angle error: {}'.format(angle_error01/np.pi*180, angle_error10/np.pi*180, angle_error/np.pi*180))
+        else:
+            angle_error = 0.0
         
         # period_harm_exp = (np.sqrt((period_harm + peak_error01[1])**2 + (peak_error01[0])**2) + np.sqrt((peak_error10[1])**2 + (period_harm + peak_error10[0])**2)) / 2
         period_harm_exp_Horz = np.sqrt((period_harm[1] + peak_error01[1])**2 + (peak_error01[0])**2)
@@ -423,9 +496,90 @@ class TalbotProcessor(WavefrontProcessor):
         # print('calculated harm period: {}\ntheoretical harm period: {}'.format(period_harm_exp, period_harm))
         # period_real = period * period_harm / period_harm_exp
         print('calculated harm period: {}V {}H\ntheoretical harm period: {}'.format(period_harm_exp_Vert, period_harm_exp_Horz, period_harm))
-        period_real = [period * period_harm[0] / period_harm_exp_Vert, period * period_harm[1] / period_harm_exp_Horz]
+
+        # Convert measured harmonic pixel offset -> spatial frequency -> detector period.
+        # f = k / N (cycles/pixel), period_real = p_x / f
+        f_v = period_harm_exp_Vert / max(1.0, float(M_shape[0]))
+        f_h = period_harm_exp_Horz / max(1.0, float(M_shape[1]))
+        period_real_v = p_x / f_v if f_v > 1e-12 else period
+        period_real_h = p_x / f_h if f_h > 1e-12 else period
+        period_real = [period_real_v, period_real_h]
+        print(
+            f"[find_rotation_angle] measured freq: V={f_v:.6f}, H={f_h:.6f} cyc/px; "
+            f"period_real: V={period_real_v*1e6:.4f} um, H={period_real_h*1e6:.4f} um"
+        )
 
         return angle_error, period_real
+
+    def _resolve_crop_bounds(self, crop_rect, shape_hw):
+        """
+        Resolve crop tuple (L, T, R, B) with two supported modes:
+        1) Absolute bounds: x in [L, R), y in [T, B)
+        2) Margin mode: remove L/T/R/B pixels from left/top/right/bottom
+           (triggered when R<=L or B<=T, or when margins are explicitly valid)
+        """
+        h, w = int(shape_hw[0]), int(shape_hw[1])
+        l = int(crop_rect[0]) if len(crop_rect) > 0 else 0
+        t = int(crop_rect[1]) if len(crop_rect) > 1 else 0
+        r = int(crop_rect[2]) if len(crop_rect) > 2 else 0
+        b = int(crop_rect[3]) if len(crop_rect) > 3 else 0
+
+        l = max(0, l)
+        t = max(0, t)
+        r = max(0, r)
+        b = max(0, b)
+
+        if l == 0 and t == 0 and r == 0 and b == 0:
+            return [0, w], [0, h]
+
+        # Try absolute-bound mode first.
+        x0_abs = min(max(l, 0), w)
+        x1_abs = min(max(r, 0), w) if r > 0 else w
+        y0_abs = min(max(t, 0), h)
+        y1_abs = min(max(b, 0), h) if b > 0 else h
+        abs_valid = (x1_abs > x0_abs) and (y1_abs > y0_abs)
+
+        # Margin mode: right/bottom are margins from image border.
+        x0_m = min(max(l, 0), w)
+        x1_m = max(x0_m, w - r if r > 0 else w)
+        y0_m = min(max(t, 0), h)
+        y1_m = max(y0_m, h - b if b > 0 else h)
+        margin_valid = (x1_m > x0_m) and (y1_m > y0_m)
+
+        # If absolute is invalid, prefer margin mode.
+        # Also prefer margin mode when user likely entered symmetric margins (R<=L or B<=T).
+        if (not abs_valid and margin_valid) or (r <= l and b <= t and margin_valid):
+            return [x0_m, x1_m], [y0_m, y1_m]
+
+        if abs_valid:
+            return [x0_abs, x1_abs], [y0_abs, y1_abs]
+
+        # Fallback to full frame if both modes invalid.
+        return [0, w], [0, h]
+
+    def _harmonic_index_from_period(self, period_eff, size, axis_name=""):
+        """
+        Convert physical period to sampled FFT harmonic index using alias-aware frequency.
+        f_raw = p_x / period_eff [cycles/pixel]
+        f_alias = |f_raw - round(f_raw)| keeps the sampled harmonic position when f_raw > Nyquist.
+        """
+        size = int(size)
+        if size < 4:
+            raise ValueError(f"Image size too small on axis {axis_name}: {size}")
+        if period_eff == 0:
+            raise ValueError(f"Effective period is zero on axis {axis_name}")
+
+        f_raw = float(self.p_x / period_eff)
+        f_alias = abs(f_raw - round(f_raw))
+
+        # Avoid exactly-DC or too-small index; keep a meaningful harmonic search.
+        f_min = 2.0 / size
+        if f_alias < f_min:
+            f_alias = f_min
+
+        idx = int(round(f_alias * size))
+        idx = max(2, min(idx, size // 2 - 2))
+        return idx, {"f_raw": f_raw, "f_alias": f_alias}
 
 
     def data_nanMask(self, data, mask):

@@ -1,0 +1,66 @@
+{
+  "run_name": "manual_20260429_173028",
+  "settings": {
+    "mode": "Talbot Interferometry",
+    "energy_kev": 7.0,
+    "pixel_size_um": 6.5,
+    "distance_mm": 2290.0,
+    "period_um": 50.75,
+    "analysis_mode": "Absolute",
+    "run_mode": "Single",
+    "correct_angle": false,
+    "use_mask": false,
+    "crop": [
+      300.0,
+      500.0,
+      1300.0,
+      1600.0
+    ],
+    "real_wf": true,
+    "source_distance_v_m": 0.2,
+    "source_distance_h_m": 0.2,
+    "plate_angle": 0.0,
+    "mask_threshold": 0.2,
+    "save_path": "",
+    "ref_image_path": ""
+  },
+  "line_cut_position_px": {
+    "x": 500,
+    "y": 550
+  },
+  "result_summary": {
+    "type": "Talbot",
+    "pv_value": 17930.710266809874,
+    "rms_value": 3218.6339019466386,
+    "roc_x": -2.256920915087321,
+    "roc_y": -2.547569981619803,
+    "period_real": [
+      43.58813678108608,
+      53.684117095811324
+    ],
+    "period_effective": [
+      631.8375,
+      631.8375
+    ],
+    "source_distance_m": [
+      0.2,
+      0.2
+    ],
+    "period_method": [
+      "source_distance",
+      "source_distance"
+    ],
+    "source_wavefront_added": true
+  },
+  "saved_files": {
+    "disp_x_png": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_disp_x.png",
+    "disp_y_png": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_disp_y.png",
+    "phase_png": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_phase.png",
+    "phase_residual_png": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_phase_residual_2nd.png",
+    "zernike_coeff_png": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_zernike_coeffs.png",
+    "zernike_fitted_png": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_zernike_fitted.png",
+    "zernike_residual_png": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_zernike_residual.png",
+    "line_cut_png": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_line_cut.png",
+    "raw_hdf5": "/Users/zqiao/Documents/Github/WaveTool/tests/manual_20260429_173028_raw.hdf5"
+  }
+}

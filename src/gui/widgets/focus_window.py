@@ -327,18 +327,38 @@ class FocusAnalysisWindow(QWidget):
 
         self.layout_3d.addWidget(controls_group)
         
-        # Use pyqtgraph GLViewWidget for interactive 3D volume rendering
-        import pyqtgraph.opengl as gl
-        self.view_3d = gl.GLViewWidget()
-        self.view_3d.setBackgroundColor('w')
-        self.view_3d.setCameraPosition(distance=200)
-        self.layout_3d.addWidget(self.view_3d)
-        
-        # Add grid
-        g = gl.GLGridItem()
-        g.scale(10, 10, 1)
-        g.setColor((0, 0, 0, 255)) # Black grid for white background
-        self.view_3d.addItem(g)
+        # Use pyqtgraph GLViewWidget for interactive 3D volume rendering.
+        # Some platforms (e.g. CentOS 7 without full OpenGL stack) do not support QOpenGLWidget.
+        self.gl_supported = False
+        self.view_3d = None
+        self.lbl_3d_fallback = None
+        try:
+            import pyqtgraph.opengl as gl
+            self._gl = gl
+            self.view_3d = gl.GLViewWidget()
+            self.view_3d.setBackgroundColor('w')
+            self.view_3d.setCameraPosition(distance=200)
+            self.layout_3d.addWidget(self.view_3d)
+            
+            # Add grid
+            g = gl.GLGridItem()
+            g.scale(10, 10, 1)
+            g.setColor((0, 0, 0, 255)) # Black grid for white background
+            self.view_3d.addItem(g)
+            self.gl_supported = True
+        except Exception as e:
+            self.lbl_3d_fallback = QLabel(
+                "3D Focus is disabled on this platform (OpenGL not available).\n"
+                f"Reason: {e}\n"
+                "2D/XZ/YZ focus analysis still works."
+            )
+            self.lbl_3d_fallback.setWordWrap(True)
+            self.layout_3d.addWidget(self.lbl_3d_fallback)
+            self.slider_threshold.setEnabled(False)
+            self.slider_opacity.setEnabled(False)
+            self.combo_color.setEnabled(False)
+            self.slider_scale_xy.setEnabled(False)
+            self.slider_scale_z.setEnabled(False)
         
         self.tabs.addTab(self.tab_3d, "3D Focus")
         
@@ -767,10 +787,10 @@ class FocusAnalysisWindow(QWidget):
         self.plot_y.setXRange(min_l, max_l, padding=0)
 
     def update_3d_view(self):
-        if self.results is None:
+        if self.results is None or not self.gl_supported or self.view_3d is None:
             return
             
-        import pyqtgraph.opengl as gl
+        gl = self._gl
         import numpy as np
         
         self.view_3d.items = [] # Clear previous items
