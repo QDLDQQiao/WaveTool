@@ -22,9 +22,9 @@ class TalbotProcessor(WavefrontProcessor):
         
         image = np.array(image, dtype=np.float32)
 
-        self.energy = params.get("energy_kev", 10.0) * 1e3
-        self.dist = params.get("distance_mm", 100.0) * 1e-3
-        self.gt_period = params.get("period_um", 4.8) * 1e-6
+        self.energy = params.get("energy_kev", 7.0) * 1e3
+        self.dist = params.get("distance_mm", 2290.0) * 1e-3
+        self.gt_period = params.get("period_um", 5.6575) * 1e-6
         self.p_x = params.get("pixel_size_um", 6.5) * 1e-6
         self.mode = str(params.get("analysis_mode", "Absolute")).strip().lower()
         self.correct_angle = params.get("correct_angle", False)
@@ -94,6 +94,7 @@ class TalbotProcessor(WavefrontProcessor):
             period_seed = self.gt_period
 
         angle_error, period_real = self.find_rotation_angle(self.p_x, period_seed, image, calculate_angle=self.correct_angle)
+        self.period_real_measured = [float(period_real[0]), float(period_real[1])]  # [V, H], detector plane
 
         M_factor = [period_real[0] / self.gt_period, period_real[1] / self.gt_period]
         print('\nCalculated real period from the image is: {}V {}H'.format(period_real[0]/self.p_x, period_real[1]/self.p_x), ' pixels')
@@ -105,6 +106,7 @@ class TalbotProcessor(WavefrontProcessor):
         #    where L is grating-detector distance and R is source distance.
         # 2) If source distance is 0, keep the current image-based method.
         self.gt_period_effect = [0.0, 0.0]
+        self.gt_period_effect_signed = [0.0, 0.0]
         self.period_source_model = [0.0, 0.0]
         self.period_method = ["image", "image"]  # [V, H]
 
@@ -112,11 +114,13 @@ class TalbotProcessor(WavefrontProcessor):
             if abs(self.source_d[i]) > 1e-12:
                 period_model = self.gt_period * (1.0 + self.dist / self.source_d[i])
                 self.period_source_model[i] = period_model
-                # Period magnitude is physically positive for harmonic spacing.
+                # Keep signed model for curvature sign, but use magnitude for FFT harmonic spacing.
+                self.gt_period_effect_signed[i] = period_model
                 self.gt_period_effect[i] = abs(period_model)
                 self.period_method[i] = "source_distance"
             else:
                 self.period_source_model[i] = self.gt_period
+                self.gt_period_effect_signed[i] = period_real[i]
                 self.gt_period_effect[i] = period_real[i]
 
         print(
@@ -377,10 +381,12 @@ class TalbotProcessor(WavefrontProcessor):
         dy = -arg10 /2 /np.pi
 
         # add back the source distance induced displacement
-        gt_period_effect_h = self.gt_period_effect[1]
-        gt_period_effect_v = self.gt_period_effect[0]
-        dx_diff = (np.arange(dx.shape[1]) - dx.shape[1] / 2.0) * (gt_period_effect_h - self.gt_period) / virtual_pixelsize[0]
-        dy_diff = (np.arange(dx.shape[0]) - dx.shape[0] / 2.0) * (gt_period_effect_v - self.gt_period) / virtual_pixelsize[1]
+        # Source-like quadratic term is based on effective period.
+        # Use signed effective period to preserve curvature sign.
+        gt_period_source_add_h = self.gt_period_effect_signed[1]
+        gt_period_source_add_v = self.gt_period_effect_signed[0]
+        dx_diff = (np.arange(dx.shape[1]) - dx.shape[1] / 2.0) * (gt_period_source_add_h - self.gt_period) / virtual_pixelsize[0]
+        dy_diff = (np.arange(dx.shape[0]) - dx.shape[0] / 2.0) * (gt_period_source_add_v - self.gt_period) / virtual_pixelsize[1]
 
         XX_diff, YY_diff = np.meshgrid(dx_diff, dy_diff)
         dx_all = dx + XX_diff
