@@ -338,31 +338,31 @@ def save_plot(line_data, px, data_title, cbar, file_path, fig_size=(5, 5), fig_s
         plt.show()
 
 def fft2(img):
-        arr = np.asarray(img)
-        if arr.ndim != 2:
-            raise ValueError(f"fft2 expects a 2D array, got shape={arr.shape}")
+        # arr = np.asarray(img)
+        # if arr.ndim != 2:
+        #     raise ValueError(f"fft2 expects a 2D array, got shape={arr.shape}")
 
-        wy = np.hanning(arr.shape[0])
-        wx = np.hanning(arr.shape[1])
-        window = np.outer(wy, wx)
+        # wy = np.hanning(arr.shape[0])
+        # wx = np.hanning(arr.shape[1])
+        # window = np.outer(wy, wx)
 
-        # Soft-edge apodization to suppress sharp-boundary FFT artifacts
-        return np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(arr * window))) / window.mean()
+        # # Soft-edge apodization to suppress sharp-boundary FFT artifacts
+        # return np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(arr * window))) / window.mean()
 
-        # return np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(img)))
+        return np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(img)))
     
 def ifft2(img):
-    arr = np.asarray(img)
-    if arr.ndim != 2:
-        raise ValueError(f"ifft2 expects a 2D array, got shape={arr.shape}")
+    # arr = np.asarray(img)
+    # if arr.ndim != 2:
+    #     raise ValueError(f"ifft2 expects a 2D array, got shape={arr.shape}")
 
-    wy = np.hanning(arr.shape[0])
-    wx = np.hanning(arr.shape[1])
-    window = np.outer(wy, wx)
+    # wy = np.hanning(arr.shape[0])
+    # wx = np.hanning(arr.shape[1])
+    # window = np.outer(wy, wx)
 
-    # Soft-edge apodization to suppress edge-related artifacts
-    return np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(arr * window))) / window.mean()
-    # return np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(img)))
+    # # Soft-edge apodization to suppress edge-related artifacts
+    # return np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(arr * window))) / window.mean()
+    return np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(img)))
 
 def fft(img, dire=0):
     return np.fft.fftshift(np.fft.fft(np.fft.ifftshift(img, axes=dire), axis=dire), axes=dire)
