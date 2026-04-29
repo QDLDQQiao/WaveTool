@@ -174,8 +174,8 @@ class TalbotProcessor(WavefrontProcessor):
         # Calculate Radius of Curvature (ROC) from a centered physical-coordinate fit.
         # This avoids pixel-index scaling ambiguity and improves numerical stability.
         
-        # roc_x, roc_y, curv_coeffs = self._estimate_curvature_radius(phase, mask=fit_mask)
-
+        roc_x, roc_y, curv_coeffs = self._estimate_curvature_radius(phase, mask=fit_mask)
+        print("[ROC estimation] Estimated ROC: roc_x={:.3f} m, roc_y={:.3f} m".format(roc_x, roc_y))
         # from matplotlib import pyplot as plt
         # plt.figure(figsize=(12, 5))
         # plt.subplot(1, 2, 1)
@@ -187,10 +187,10 @@ class TalbotProcessor(WavefrontProcessor):
         # plt.colorbar()
         # plt.title('Gradient of dy (physical units)')
         # plt.show()
-        roc_x = np.mean(1/(np.gradient(dx, axis=1)/self.dist))
-        roc_y = np.mean(1/(np.gradient(dy, axis=0)/self.dist))
+        roc_x_byDPC = 1/np.mean((np.gradient(dx, axis=1)/self.dist))
+        roc_y_byDPC = 1/np.mean((np.gradient(dy, axis=0)/self.dist))
 
-        print("[ROC estimation] Estimated ROC: roc_x={:.3f} m, roc_y={:.3f} m".format(roc_x, roc_y))
+        print("[ROC estimation] Estimated ROC: roc_x={:.3f} m, roc_y={:.3f} m".format(roc_x_byDPC, roc_y_byDPC))
 
 
         # print(
