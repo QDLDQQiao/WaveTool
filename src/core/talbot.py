@@ -82,7 +82,7 @@ class TalbotProcessor(WavefrontProcessor):
             # get the mask for the main beam in the image
             img_filter = calculate_envelope(image, self.gt_period/self.p_x)
 
-            mask_threshold = 0.05
+            mask_threshold = 0.1
             mask = np.ones(img_filter.shape) * ((img_filter-img_filter.min()) > mask_threshold*(img_filter.max()-img_filter.min()))
 
         # Use source-distance model as search seed when available, otherwise ideal period.
@@ -173,12 +173,31 @@ class TalbotProcessor(WavefrontProcessor):
         
         # Calculate Radius of Curvature (ROC) from a centered physical-coordinate fit.
         # This avoids pixel-index scaling ambiguity and improves numerical stability.
-        roc_x, roc_y, curv_coeffs = self._estimate_curvature_radius(phase, mask=fit_mask)
-        print(
-            "[ROC fit] a_xx={:.6e} rad/m^2, a_yy={:.6e} rad/m^2".format(
-                curv_coeffs[3], curv_coeffs[5]
-            )
-        )
+        
+        # roc_x, roc_y, curv_coeffs = self._estimate_curvature_radius(phase, mask=fit_mask)
+
+        # from matplotlib import pyplot as plt
+        # plt.figure(figsize=(12, 5))
+        # plt.subplot(1, 2, 1)
+        # plt.imshow(np.gradient(dx, axis=1)/self.dist, cmap='jet')
+        # plt.colorbar()
+        # plt.title('Gradient of dx (physical units)')
+        # plt.subplot(1, 2, 2)    
+        # plt.imshow(np.gradient(dy, axis=0)/self.dist, cmap='jet')
+        # plt.colorbar()
+        # plt.title('Gradient of dy (physical units)')
+        # plt.show()
+        roc_x = np.mean(1/(np.gradient(dx, axis=1)/self.dist))
+        roc_y = np.mean(1/(np.gradient(dy, axis=0)/self.dist))
+
+        print("[ROC estimation] Estimated ROC: roc_x={:.3f} m, roc_y={:.3f} m".format(roc_x, roc_y))
+
+
+        # print(
+        #     "[ROC fit] a_xx={:.6e} rad/m^2, a_yy={:.6e} rad/m^2".format(
+        #         curv_coeffs[3], curv_coeffs[5]
+        #     )
+        # )
 
         # --- Zernike Analysis ---
         zernike_order = params.get("zernike_order", 15)

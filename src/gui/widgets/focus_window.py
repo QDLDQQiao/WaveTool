@@ -731,8 +731,8 @@ class FocusAnalysisWindow(QWidget):
                 pad_suggest = 1.5
 
         suggested = {
-            "upsampling": float(np.clip(up_suggest, 0.1, 10.0)),
-            "padding_scale": float(np.clip(pad_suggest, 1.0, 10.0)),
+            "upsampling": float(np.clip(up_suggest, 0.01, 50.0)),
+            "padding_scale": float(np.clip(pad_suggest, 1.0, 50.0)),
             "magnification_x": float(np.clip(mag_x_suggest, 0.001, 1000.0)),
             "magnification_y": float(np.clip(mag_y_suggest, 0.001, 1000.0)),
         }

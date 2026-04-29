@@ -598,6 +598,15 @@ class MainWindow(QMainWindow):
             if out:
                 saved_files[key] = out
 
+        # HDF5 — comprehensive structured file with all arrays and metadata
+        h5_path = self._save_hdf5(
+            output_folder, base, results, settings,
+            image_stem=image_stem, is_monitor=is_monitor,
+            source_image_path=source_image_path, timestamp=timestamp,
+        )
+        if h5_path:
+            saved_files["hdf5"] = h5_path
+
         run_data = {
             "run_name": base,
             "image_stem": image_stem,
@@ -613,6 +622,82 @@ class MainWindow(QMainWindow):
         with open(json_path, "w", encoding="utf-8") as fp:
             json.dump(run_data, fp, indent=2, ensure_ascii=False)
         print(f"Saved result json: {json_path}")
+
+    def _save_hdf5(self, output_folder, base, results, settings,
+                   image_stem="", is_monitor=False, source_image_path=None, timestamp=""):
+        """Write a structured HDF5 file: /arrays (compressed), /scalars, /settings."""
+        try:
+            import h5py
+        except ImportError:
+            print("h5py not installed — skipping HDF5 save.")
+            return None
+
+        array_keys = [
+            "displacement_x", "displacement_y",
+            "phase_map", "phase_residual_2nd",
+            "transmission", "mask",
+            "zernike_fitted", "zernike_residual", "zernike_coeffs",
+        ]
+
+        h5_path = os.path.join(output_folder, f"{base}.hdf5")
+        with h5py.File(h5_path, "w") as f:
+            # Root attributes
+            f.attrs["run_name"] = base
+            f.attrs["image_stem"] = image_stem
+            f.attrs["is_monitor"] = int(bool(is_monitor))
+            f.attrs["timestamp"] = timestamp
+            f.attrs["processor"] = getattr(self.current_processor, "name",
+                                           str(type(self.current_processor)))
+            if source_image_path:
+                f.attrs["source_image_path"] = source_image_path
+
+            # /arrays group — compressed raw data
+            arr_grp = f.create_group("arrays")
+            for key in array_keys:
+                arr = results.get(key)
+                if arr is None:
+                    continue
+                data = np.asarray(arr)
+                arr_grp.create_dataset(
+                    key,
+                    data=data.astype(np.float32 if np.issubdtype(data.dtype, np.floating) else data.dtype),
+                    compression="gzip", compression_opts=6,
+                )
+                arr_grp[key].attrs["description"] = key.replace("_", " ").title()
+
+            # /scalars group — scalar and small-vector results
+            scalar_grp = f.create_group("scalars")
+            for k, v in results.items():
+                if k in array_keys:
+                    continue
+                if isinstance(v, (int, float, bool, np.integer, np.floating)):
+                    scalar_grp.attrs[k] = float(v)
+                elif isinstance(v, (list, tuple)) and len(v) <= 16 and all(
+                    isinstance(x, (int, float, np.integer, np.floating)) for x in v
+                ):
+                    scalar_grp.create_dataset(k, data=np.array(v, dtype=np.float64))
+                elif isinstance(v, str):
+                    scalar_grp.attrs[k] = v
+                elif isinstance(v, (list, tuple)) and all(isinstance(x, str) for x in v):
+                    scalar_grp.attrs[k] = ", ".join(v)
+
+            # /settings group — GUI settings
+            settings_grp = f.create_group("settings")
+            for k, v in settings.items():
+                try:
+                    if isinstance(v, (int, float, bool, np.integer, np.floating)):
+                        settings_grp.attrs[str(k)] = float(v) if isinstance(v, (float, np.floating)) else int(v)
+                    elif isinstance(v, str):
+                        settings_grp.attrs[str(k)] = v
+                    elif isinstance(v, (list, tuple)):
+                        settings_grp.attrs[str(k)] = json.dumps(v)
+                    else:
+                        settings_grp.attrs[str(k)] = str(v)
+                except Exception:
+                    pass
+
+        print(f"Saved HDF5: {h5_path}")
+        return h5_path
 
     def _save_array(self, folder, base_name, arr):
         if arr is None:

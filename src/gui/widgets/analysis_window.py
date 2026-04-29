@@ -1,5 +1,6 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSpinBox, 
-                             QPushButton, QGridLayout, QScrollArea, QTabWidget)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSpinBox,
+                             QPushButton, QGridLayout, QScrollArea, QTabWidget, QFileDialog,
+                             QMessageBox)
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 except ImportError:
@@ -7,6 +8,8 @@ except ImportError:
 from matplotlib.figure import Figure
 import numpy as np
 import os
+import json
+from datetime import datetime
 
 from ...core.calculations import fit_zernike
 from .focus_window import FocusAnalysisWindow
@@ -138,11 +141,20 @@ class AnalysisResultWindow(QWidget):
         self.add_plot(self.grid_zernike, 0, 2, "Zernike Residual", results.get('zernike_residual'), cmap='jet')
         self.tabs.addTab(self.tab_zernike, "Zernike")
         
-        # --- Bottom: Focus Button ---
+        # --- Bottom: Action Buttons ---
+        btn_row = QHBoxLayout()
+
         self.btn_focus = QPushButton("Focus Analysis")
         self.btn_focus.setStyleSheet("font-size: 16px; padding: 10px;")
         self.btn_focus.clicked.connect(self.open_focus_window)
-        self.layout.addWidget(self.btn_focus)
+        btn_row.addWidget(self.btn_focus)
+
+        self.btn_save_hdf5 = QPushButton("Save HDF5")
+        self.btn_save_hdf5.setStyleSheet("font-size: 16px; padding: 10px;")
+        self.btn_save_hdf5.clicked.connect(self.save_hdf5_dialog)
+        btn_row.addWidget(self.btn_save_hdf5)
+
+        self.layout.addLayout(btn_row)
 
     def add_plot(self, grid, row, col, title, data, cmap='viridis'):
         if data is None: return
@@ -279,16 +291,94 @@ class AnalysisResultWindow(QWidget):
         # Keep line-cut tied to latest phase map
         self.update_line_cut_plot()
 
+    def save_hdf5_dialog(self):
+        """Prompt the user for a save path and write a comprehensive HDF5 file."""
+        default_name = f"wavetool_{datetime.now().strftime('%Y%m%d_%H%M%S')}.hdf5"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save HDF5", default_name, "HDF5 Files (*.hdf5 *.h5)"
+        )
+        if not path:
+            return
+        try:
+            self._write_hdf5(path, run_name=os.path.splitext(os.path.basename(path))[0], settings={})
+            QMessageBox.information(self, "Saved", f"HDF5 saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+
+    def _write_hdf5(self, h5_path, run_name, settings):
+        """Write a structured HDF5 file with all result arrays and metadata."""
+        import h5py
+
+        # 2D / nD array keys to store under /arrays/
+        array_keys = [
+            "displacement_x", "displacement_y",
+            "phase_map", "phase_residual_2nd",
+            "transmission", "mask",
+            "zernike_fitted", "zernike_residual", "zernike_coeffs",
+        ]
+
+        with h5py.File(h5_path, "w") as f:
+            # Root attributes
+            f.attrs["run_name"] = run_name
+            f.attrs["created"] = datetime.now().isoformat()
+            f.attrs["line_cut_x_px"] = int(self.spin_line_x.value())
+            f.attrs["line_cut_y_px"] = int(self.spin_line_y.value())
+
+            # /arrays group — compressed raw data
+            arr_grp = f.create_group("arrays")
+            for key in array_keys:
+                arr = self.results.get(key)
+                if arr is None:
+                    continue
+                data = np.asarray(arr)
+                # 1-D arrays (e.g. zernike_coeffs) don't need 2-D compression hint
+                arr_grp.create_dataset(
+                    key, data=data.astype(np.float32 if np.issubdtype(data.dtype, np.floating) else data.dtype),
+                    compression="gzip", compression_opts=6
+                )
+                arr_grp[key].attrs["description"] = key.replace("_", " ").title()
+
+            # /scalars group — scalar and small-vector results
+            scalar_grp = f.create_group("scalars")
+            for k, v in self.results.items():
+                if k in array_keys:
+                    continue
+                if isinstance(v, (int, float, bool, np.integer, np.floating)):
+                    scalar_grp.attrs[k] = float(v)
+                elif isinstance(v, (list, tuple)) and len(v) <= 16 and all(
+                    isinstance(x, (int, float, np.integer, np.floating)) for x in v
+                ):
+                    scalar_grp.create_dataset(k, data=np.array(v, dtype=np.float64))
+                elif isinstance(v, str):
+                    scalar_grp.attrs[k] = v
+                elif isinstance(v, (list, tuple)) and all(isinstance(x, str) for x in v):
+                    scalar_grp.attrs[k] = ", ".join(v)
+
+            # /settings group — all GUI settings
+            if settings:
+                settings_grp = f.create_group("settings")
+                for k, v in settings.items():
+                    try:
+                        if isinstance(v, (int, float, bool, np.integer, np.floating)):
+                            settings_grp.attrs[str(k)] = float(v) if isinstance(v, (float, np.floating)) else int(v)
+                        elif isinstance(v, str):
+                            settings_grp.attrs[str(k)] = v
+                        elif isinstance(v, (list, tuple)):
+                            settings_grp.attrs[str(k)] = json.dumps(v)
+                        else:
+                            settings_grp.attrs[str(k)] = str(v)
+                    except Exception:
+                        pass
+
+        return h5_path
+
     def save_result_bundle(self, output_folder, run_name, settings):
         """
         Save result bundle:
         - PNG figures: disp X/Y, phase, residual, zernike coeff/fitted/residual, line cut.
         - JSON: settings + scalar metrics + line-cut position.
-        - HDF5: key raw arrays.
+        - HDF5: all arrays + metadata.
         """
-        import json
-        import h5py
-
         os.makedirs(output_folder, exist_ok=True)
 
         def save_img_png(data, title, file_name, cmap='viridis'):
@@ -330,14 +420,10 @@ class AnalysisResultWindow(QWidget):
             self.line_fig.savefig(line_path, dpi=150)
             files["line_cut_png"] = line_path
 
-        # HDF5 for raw maps and zernike analysis
-        h5_path = os.path.join(output_folder, f"{run_name}_raw.hdf5")
-        with h5py.File(h5_path, "w") as f:
-            for key in ["displacement_x", "displacement_y", "phase_map", "phase_residual_2nd", "zernike_residual", "zernike_fitted", "zernike_coeffs"]:
-                arr = self.results.get(key)
-                if arr is not None:
-                    f.create_dataset(key, data=np.asarray(arr), compression="gzip", compression_opts=6)
-        files["raw_hdf5"] = h5_path
+        # HDF5 — comprehensive structured file
+        h5_path = os.path.join(output_folder, f"{run_name}.hdf5")
+        self._write_hdf5(h5_path, run_name=run_name, settings=settings)
+        files["hdf5"] = h5_path
 
         # JSON for parameters and scalar summary
         summary = {}
