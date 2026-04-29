@@ -171,20 +171,14 @@ class TalbotProcessor(WavefrontProcessor):
         fit_mask = (mask > 0) if self.use_mask else None
         _, residual_2nd, coeffs_2nd = fit_remove_2nd_order(phase, mask=fit_mask)
         
-        # Calculate Radius of Curvature (ROC)
-        # Phase phi(x) approx - pi * x^2 / (lambda * R)
-        # coeffs[3] is x^2 term (c3), coeffs[5] is y^2 term (c5)
-        # c3 = - pi * p^2 / (lambda * Rx)  (if x is in pixels)
-        # Rx = - pi * p^2 / (lambda * c3)
-        
-        c3 = coeffs_2nd[3]
-        c5 = coeffs_2nd[5]
-        print(c3, c5)
-        if abs(c3) < 1e-12: roc_x = float('inf')
-        else: roc_x = - np.pi * self.p_x**2 / (self.wavelength * c3)
-            
-        if abs(c5) < 1e-12: roc_y = float('inf')
-        else: roc_y = - np.pi * self.p_x**2 / (self.wavelength * c5)
+        # Calculate Radius of Curvature (ROC) from a centered physical-coordinate fit.
+        # This avoids pixel-index scaling ambiguity and improves numerical stability.
+        roc_x, roc_y, curv_coeffs = self._estimate_curvature_radius(phase, mask=fit_mask)
+        print(
+            "[ROC fit] a_xx={:.6e} rad/m^2, a_yy={:.6e} rad/m^2".format(
+                curv_coeffs[3], curv_coeffs[5]
+            )
+        )
 
         # --- Zernike Analysis ---
         zernike_order = params.get("zernike_order", 15)
@@ -381,12 +375,22 @@ class TalbotProcessor(WavefrontProcessor):
         dy = -arg10 /2 /np.pi
 
         # add back the source distance induced displacement
-        # Source-like quadratic term is based on effective period.
-        # Use signed effective period to preserve curvature sign.
-        gt_period_source_add_h = self.gt_period_effect_signed[1]
-        gt_period_source_add_v = self.gt_period_effect_signed[0]
-        dx_diff = (np.arange(dx.shape[1]) - dx.shape[1] / 2.0) * (gt_period_source_add_h - self.gt_period) / virtual_pixelsize[0]
-        dy_diff = (np.arange(dx.shape[0]) - dx.shape[0] / 2.0) * (gt_period_source_add_v - self.gt_period) / virtual_pixelsize[1]
+        # Use the effective period used for harmonic localization (from period_harm)
+        # and compare it against the ideal input grating period.
+        print('Using effective period for source-distance correction: {}V {}H (um)'.format(self.gt_period_effect[0]*1e6, self.gt_period_effect[1]*1e6))
+        print(self.gt_period_effect, self.gt_period_effect_signed, self.gt_period)
+        
+        dx_diff = (np.arange(dx.shape[1]) - dx.shape[1] / 2.0) * (
+            self.p_x / period_harm_Hor * M_shape[1] + self.gt_period
+        ) / virtual_pixelsize[0]
+        dy_diff = (np.arange(dx.shape[0]) - dx.shape[0] / 2.0) * (
+            self.p_x / period_harm_Vert * M_shape[0] + self.gt_period
+        ) / virtual_pixelsize[1]
+
+        
+        # # add back the source distance induced displacement
+        # dx_diff = (np.arange(dx.shape[1]) - dx.shape[1]/2) * (self.p_x/period_harm_Hor*M_shape[1] - self.gt_period)/virtual_pixelsize[0]
+        # dy_diff = (np.arange(dx.shape[0]) - dx.shape[0]/2) * (self.p_x/period_harm_Vert*M_shape[0] - self.gt_period)/virtual_pixelsize[1]
 
         XX_diff, YY_diff = np.meshgrid(dx_diff, dy_diff)
         dx_all = dx + XX_diff
@@ -587,6 +591,55 @@ class TalbotProcessor(WavefrontProcessor):
         idx = max(2, min(idx, size // 2 - 2))
         return idx, {"f_raw": f_raw, "f_alias": f_alias}
 
+    def _estimate_curvature_radius(self, phase_map: np.ndarray, mask: np.ndarray = None):
+        """
+        Fit phase with a 2nd-order polynomial on centered physical coordinates (meters):
+        phi = a0 + a1*x + a2*y + a3*x^2 + a4*x*y + a5*y^2
+        For a spherical term, phi approx -pi*x^2/(lambda*R), so R = -pi/(lambda*a3).
+        """
+        h, w = phase_map.shape
+        y_idx, x_idx = np.mgrid[:h, :w]
+        x_m = (x_idx - (w - 1) / 2.0) * self.p_x
+        y_m = (y_idx - (h - 1) / 2.0) * self.p_x
+
+        x_flat = x_m.ravel()
+        y_flat = y_m.ravel()
+        z_flat = phase_map.ravel()
+        A = np.column_stack(
+            (
+                np.ones_like(x_flat),
+                x_flat,
+                y_flat,
+                x_flat**2,
+                x_flat * y_flat,
+                y_flat**2,
+            )
+        )
+
+        if mask is not None:
+            mask_flat = np.asarray(mask, dtype=bool).ravel()
+            A_fit = A[mask_flat]
+            z_fit = z_flat[mask_flat]
+        else:
+            A_fit = A
+            z_fit = z_flat
+
+        coeffs, _, _, _ = np.linalg.lstsq(A_fit, z_fit, rcond=None)
+        a_xx = coeffs[3]
+        a_yy = coeffs[5]
+
+        if abs(a_xx) < 1e-18:
+            roc_x = float('inf')
+        else:
+            roc_x = -np.pi / (self.wavelength * a_xx)
+
+        if abs(a_yy) < 1e-18:
+            roc_y = float('inf')
+        else:
+            roc_y = -np.pi / (self.wavelength * a_yy)
+
+        return roc_x, roc_y, coeffs
+
 
     def data_nanMask(self, data, mask):
         '''
@@ -667,17 +720,17 @@ class TalbotProcessor(WavefrontProcessor):
         # So c3 = - pi * p^2 / (lambda * f)
         # f = - pi * p^2 / (lambda * c3)
         
-        coeffs = fit_2nd_order_coeffs(phase_map)
-        c3 = coeffs[3] # x^2 term
-        c5 = coeffs[5] # y^2 term
-        
-        # Average x and y curvature for focal length estimate
-        c_avg = (c3 + c5) / 2.0
-        
-        if abs(c_avg) < 1e-9:
+        _, _, curv_coeffs = self._estimate_curvature_radius(phase_map)
+        a_xx = curv_coeffs[3]
+        a_yy = curv_coeffs[5]
+
+        # Average x/y physical curvature coefficients (rad/m^2)
+        a_avg = (a_xx + a_yy) / 2.0
+
+        if abs(a_avg) < 1e-18:
             f_est = 0.0
         else:
-            f_est = - np.pi * self.p_x**2 / (self.wavelength * c_avg)
+            f_est = - np.pi / (self.wavelength * a_avg)
             
         print(f"Estimated Focal Length: {f_est*1e3:.2f} mm")
         
